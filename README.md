@@ -50,6 +50,7 @@ Create `~/.cursor-enhanced-config.json`:
 
 ```json
 {
+  "history_limit": 5,
   "system_prompts": {
     "default": "You are a helpful AI assistant.",
     "coder": "You are an expert software engineer. Focus on clean code.",
@@ -62,3 +63,8 @@ Then use:
 ```bash
 cursor-enhanced --system-prompt pirate -p "Hello"
 ```
+
+### Configuration Options
+
+- `history_limit` (integer): Number of previous messages to send as context (default: 10). Can also be set via `CURSOR_ENHANCED_HISTORY_LIMIT` env var or `--history-limit` flag.
+- `system_prompts` (dict): Named system prompts.

@@ -122,12 +122,24 @@ def summarize_history(history, cursor_flags):
         return history
 
 def main():
-    # Use environment variable for default history limit if available
+    # Load config first to check for defaults
+    config = load_config()
+
+    # Determine default history limit precedence:
+    # 1. Environment variable
+    # 2. Config file
+    # 3. Hardcoded default
     env_limit = os.environ.get("CURSOR_ENHANCED_HISTORY_LIMIT")
-    default_limit = int(env_limit) if env_limit and env_limit.isdigit() else DEFAULT_HISTORY_LIMIT
+    
+    if env_limit and env_limit.isdigit():
+        default_limit = int(env_limit)
+    elif "history_limit" in config and isinstance(config["history_limit"], int):
+        default_limit = config["history_limit"]
+    else:
+        default_limit = DEFAULT_HISTORY_LIMIT
 
     parser = argparse.ArgumentParser(description="Wrapper for cursor-agent with history context")
-    parser.add_argument("--history-limit", type=int, default=default_limit, help="Number of previous messages to include")
+    parser.add_argument("--history-limit", type=int, default=default_limit, help=f"Number of previous messages to include (default: {default_limit})")
     parser.add_argument("--clear-history", action="store_true", help="Clear conversation history")
     parser.add_argument("--view-history", action="store_true", help="View conversation history")
     parser.add_argument("--system-prompt", type=str, default="default", help="Name of the system prompt configuration to use")
@@ -205,7 +217,7 @@ def main():
         return
 
     # Load config and history
-    config = load_config()
+    # config is already loaded at start of main
     history = load_history(history_file)
     
     # Resolve system prompt
