@@ -94,7 +94,8 @@ def summarize_history(history, cursor_flags):
     
     try:
         # We use --print to get stdout
-        cmd = ["cursor-agent"] + cursor_flags + ["-p", summary_prompt]
+        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+        cmd = ["bash", cursor_agent_path] + cursor_flags + ["-p", summary_prompt]
         
         result = subprocess.run(
             cmd,
@@ -213,7 +214,9 @@ def main():
     user_prompt = " ".join(user_prompt_parts)
     
     if not user_prompt:
-        subprocess.run(["cursor-agent"] + unknown_args)
+        # Use direct path for compatibility
+        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+        subprocess.run(["bash", cursor_agent_path] + unknown_args)
         return
 
     # Load config and history
@@ -258,7 +261,9 @@ def main():
     full_prompt = "".join(full_prompt_parts)
     
     # Construct command
-    cmd = ["cursor-agent"] + cursor_flags + [full_prompt]
+    # Use direct path to cursor-agent via bash for compatibility
+    cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+    cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
     
     # Run and capture output
     process = subprocess.Popen(
