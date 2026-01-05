@@ -4,12 +4,13 @@ A wrapper for `cursor-agent` that provides enhanced functionality such as persis
 
 ## Features
 
-- **Persistent History**: Remembers your conversation across sessions.
-- **Context Injection**: Automatically feeds recent conversation history to the agent.
-- **Auto-Summarization**: Compresses history when it exceeds token limits (default ~100k tokens).
-- **Multiple Chats**: Support for separate chat sessions using `--chat <name>`.
-- **System Prompts**: Configurable system prompts via `~/.cursor-enhanced-config.json` or `--system-prompt`.
-- **History Viewer**: View past conversations with `--view-history`.
+- **Persistent History**: Remembers your conversation across sessions, stored in `~/.cursor-enhanced-history.json` (or per-chat files).
+- **Smart Context Management**: Automatically selects conversation history that fits within token limits (~100k tokens default) using intelligent token-based selection.
+- **Auto-Summarization**: Automatically compresses old conversation history when it exceeds token limits, preserving recent messages and creating a summary of older ones.
+- **Multiple Chats**: Support for separate chat sessions using `--chat <name>`, each with its own history file.
+- **System Prompts**: Configurable system prompts via `~/.cursor-enhanced-config.json` or `--system-prompt` flag.
+- **History Management**: View past conversations with `--view-history` and clear history with `--clear-history`.
+- **Logging**: Comprehensive logging to `~/.cursor-enhanced/logs/cursor-enhanced.log` with automatic rotation (5MB max, 5 backups).
 
 ## Installation
 
@@ -42,6 +43,9 @@ cursor-enhanced --chat project-alpha --view-history
 
 # Clear history
 cursor-enhanced --chat project-alpha --clear-history
+
+# Use a specific system prompt
+cursor-enhanced --system-prompt coder -p "Review this code"
 ```
 
 ## Configuration
@@ -50,7 +54,7 @@ Create `~/.cursor-enhanced-config.json`:
 
 ```json
 {
-  "history_limit": 5,
+  "history_limit": 10,
   "system_prompts": {
     "default": "You are a helpful AI assistant.",
     "coder": "You are an expert software engineer. Focus on clean code.",
@@ -59,12 +63,22 @@ Create `~/.cursor-enhanced-config.json`:
 }
 ```
 
-Then use:
-```bash
-cursor-enhanced --system-prompt pirate -p "Hello"
-```
-
 ### Configuration Options
 
-- `history_limit` (integer): Number of previous messages to send as context (default: 10). Can also be set via `CURSOR_ENHANCED_HISTORY_LIMIT` env var or `--history-limit` flag.
-- `system_prompts` (dict): Named system prompts.
+- `history_limit` (integer, optional): Number of previous messages to send as context when using fixed-count mode. If not set, the tool uses smart token-based selection (default behavior). Can also be set via `CURSOR_ENHANCED_HISTORY_LIMIT` environment variable or `--history-limit` flag.
+- `system_prompts` (dict): Named system prompts that can be referenced with `--system-prompt <name>`.
+
+### History Management
+
+By default, `cursor-enhanced` uses **smart token-based history selection**, automatically including as much conversation history as possible while staying within the ~100k token limit. This ensures optimal context without manual tuning.
+
+If you prefer a fixed number of messages, set `history_limit` in the config file, use the `CURSOR_ENHANCED_HISTORY_LIMIT` environment variable, or pass `--history-limit <number>`.
+
+When history exceeds the token limit, the tool automatically summarizes older messages while preserving recent context, ensuring you always have relevant conversation history available.
+
+### Logging
+
+All interactions are logged to `~/.cursor-enhanced/logs/cursor-enhanced.log` with automatic log rotation:
+- Maximum log file size: 5MB
+- Number of backup files: 5
+- Logs include timestamps, user requests, agent responses, and summarization events
