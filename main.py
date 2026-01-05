@@ -3,6 +3,8 @@ import os
 import json
 import subprocess
 import argparse
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
 DEFAULT_HISTORY_FILE = os.path.expanduser("~/.cursor-enhanced-history.json")
@@ -11,6 +13,28 @@ DEFAULT_HISTORY_LIMIT = 10
 TOKEN_LIMIT = 100000
 # Approximating 1 token as 4 characters
 CHARS_PER_TOKEN = 4
+
+# Logging configuration
+LOG_DIR = os.path.expanduser("~/.cursor-enhanced/logs")
+LOG_FILE = os.path.join(LOG_DIR, "cursor-enhanced.log")
+
+def setup_logging():
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR)
+    
+    logger = logging.getLogger("cursor_enhanced")
+    logger.setLevel(logging.INFO)
+    
+    if not logger.handlers:
+        # Rotate logs: Max 5MB, keep 5 backups
+        handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+    return logger
+
+logger = setup_logging()
 
 def get_history_file(chat_name=None):
     if not chat_name:
@@ -83,14 +107,17 @@ def summarize_history(history, cursor_flags):
         text_to_summarize += f"{role}: {item['content']}\n\n"
         
     summary_prompt = (
-        "Please provide a concise summary of the following conversation history. "
-        "Capture the key points, decisions, and context. "
+        "Please provide a comprehensive summary of the following conversation history. "
+        "Retain all key technical details, code snippets, decisions, and context. "
+        "The summary should be dense and information-rich to serve as context for future interactions. "
         "Do not output anything else but the summary.\n\n"
         f"{text_to_summarize}"
     )
     
     # Call cursor-agent to summarize
     print("Auto-summarizing history...", file=sys.stderr)
+    logger.info("Starting auto-summarization of history.")
+    logger.info(f"Messages to summarize: {len(old_messages)}")
     
     try:
         # We use --print to get stdout
@@ -102,11 +129,16 @@ def summarize_history(history, cursor_flags):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=120 # Timeout for summarization
+            timeout=180 # Increased timeout for better summarization
         )
         
         if result.returncode == 0:
             summary = result.stdout.strip()
+            
+            logger.info("Summarization successful.")
+            logger.info(f"Summary length: {len(summary)} chars")
+            logger.info(f"Summary content: {summary}")
+            
             # Create a new history entry for the summary
             summary_entry = {
                 "role": "system", 
@@ -115,11 +147,15 @@ def summarize_history(history, cursor_flags):
             # New history is Summary + Recent Messages
             return [summary_entry] + recent_messages
         else:
-            print(f"Summarization failed: {result.stderr}", file=sys.stderr)
+            error_msg = f"Summarization failed: {result.stderr}"
+            print(error_msg, file=sys.stderr)
+            logger.error(error_msg)
             return history
             
     except Exception as e:
-        print(f"Summarization error: {e}", file=sys.stderr)
+        error_msg = f"Summarization error: {e}"
+        print(error_msg, file=sys.stderr)
+        logger.exception(error_msg)
         return history
 
 def main():
@@ -155,7 +191,9 @@ def main():
     if args.clear_history:
         if os.path.exists(history_file):
             os.remove(history_file)
-        print(f"History cleared for session: {args.chat if args.chat else 'default'}")
+        msg = f"History cleared for session: {args.chat if args.chat else 'default'}"
+        print(msg)
+        logger.info(msg)
         return
         
     if args.view_history:
@@ -219,6 +257,9 @@ def main():
         subprocess.run(["bash", cursor_agent_path] + unknown_args)
         return
 
+    # Log user prompt
+    logger.info(f"User Request (Session: {args.chat if args.chat else 'default'}): {user_prompt}")
+
     # Load config and history
     # config is already loaded at start of main
     history = load_history(history_file)
@@ -243,6 +284,7 @@ def main():
     total_text = system_prompt_content + formatted_history
     
     if estimate_tokens(total_text) > TOKEN_LIMIT:
+        logger.info(f"Token limit exceeded ({estimate_tokens(total_text)} > {TOKEN_LIMIT}). Triggering summarization.")
         history = summarize_history(history, cursor_flags)
         save_history(history, history_file)
         # Re-format
@@ -295,6 +337,11 @@ def main():
         history.append({"role": "user", "content": user_prompt})
         history.append({"role": "agent", "content": agent_response.strip()})
         save_history(history, history_file)
+        
+        # Log final result
+        logger.info(f"Agent Response: {agent_response.strip()}")
+    else:
+        logger.error(f"Agent execution failed with return code {process.returncode}")
 
 if __name__ == "__main__":
     main()
