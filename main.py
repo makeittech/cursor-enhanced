@@ -72,15 +72,76 @@ def save_history(history, filepath):
 def estimate_tokens(text):
     return len(text) // CHARS_PER_TOKEN
 
-def format_history_for_prompt(history, limit):
-    relevant_history = history[-limit:] if limit > 0 else []
+def format_message(role, content):
+    return f"{role}: {content}\n\n"
+
+def get_history_fitting_token_limit(history, max_tokens, system_prompt_tokens, user_prompt_tokens):
+    """
+    Selects as many recent messages as possible that fit within the token limit.
+    Always tries to preserve the summary (first message if role is system) if present.
+    """
+    if not history:
+        return [], 0
+
+    available_tokens = max_tokens - system_prompt_tokens - user_prompt_tokens
+    # Reserve a safety buffer
+    available_tokens -= 1000 
     
-    if not relevant_history:
+    if available_tokens <= 0:
+        return [], 0
+
+    # Check for summary
+    summary_msg = None
+    remaining_history = history
+    if history[0].get('role') == 'system':
+        summary_msg = history[0]
+        remaining_history = history[1:]
+    
+    selected_messages = []
+    current_tokens = 0
+    
+    # If summary exists, include it first
+    if summary_msg:
+        summary_text = format_message("SYSTEM SUMMARY", summary_msg['content'])
+        summary_tokens = estimate_tokens(summary_text)
+        if summary_tokens < available_tokens:
+            selected_messages.append(summary_msg)
+            current_tokens += summary_tokens
+        else:
+            # Summary is too big? This is bad.
+            # We will still try to include it, but maybe we need to re-summarize everything.
+            # For now, let's just proceed with other messages if summary takes everything? 
+            # No, if summary takes everything, we have no space for context.
+            pass
+
+    # Now add recent messages from the end
+    temp_messages = []
+    for item in reversed(remaining_history):
+        role = "User" if item['role'] == 'user' else "Agent"
+        msg_text = format_message(role, item['content'])
+        msg_tokens = estimate_tokens(msg_text)
+        
+        if current_tokens + msg_tokens <= available_tokens:
+            temp_messages.append(item)
+            current_tokens += msg_tokens
+        else:
+            break
+            
+    # Reverse back to chronological order and append to selected
+    selected_messages.extend(reversed(temp_messages))
+    
+    return selected_messages, current_tokens
+
+def format_history_for_prompt(history):
+    if not history:
         return ""
 
     formatted_context = "=== START OF CONVERSATION HISTORY ===\n"
-    for item in relevant_history:
+    for item in history:
         role = "User" if item['role'] == 'user' else "Agent"
+        if item['role'] == 'system':
+            role = "SYSTEM SUMMARY"
+            
         content = item['content']
         formatted_context += f"{role}: {content}\n\n"
     formatted_context += "=== END OF CONVERSATION HISTORY ===\n\n"
@@ -168,15 +229,17 @@ def main():
     # 3. Hardcoded default
     env_limit = os.environ.get("CURSOR_ENHANCED_HISTORY_LIMIT")
     
+    default_limit = None # Default is now None (Token Limit based)
+    
     if env_limit and env_limit.isdigit():
         default_limit = int(env_limit)
     elif "history_limit" in config and isinstance(config["history_limit"], int):
         default_limit = config["history_limit"]
-    else:
-        default_limit = DEFAULT_HISTORY_LIMIT
+    
+    # If explicitly None, we default to token limit, but for argparser default=None works.
 
     parser = argparse.ArgumentParser(description="Wrapper for cursor-agent with history context")
-    parser.add_argument("--history-limit", type=int, default=default_limit, help=f"Number of previous messages to include (default: {default_limit})")
+    parser.add_argument("--history-limit", type=int, default=default_limit, help=f"Number of previous messages to include (default: max fitting tokens)")
     parser.add_argument("--clear-history", action="store_true", help="Clear conversation history")
     parser.add_argument("--view-history", action="store_true", help="View conversation history")
     parser.add_argument("--system-prompt", type=str, default="default", help="Name of the system prompt configuration to use")
@@ -261,7 +324,6 @@ def main():
     logger.info(f"User Request (Session: {args.chat if args.chat else 'default'}): {user_prompt}")
 
     # Load config and history
-    # config is already loaded at start of main
     history = load_history(history_file)
     
     # Resolve system prompt
@@ -279,25 +341,60 @@ def main():
             if "system_prompts" in config and "default" in config["system_prompts"]:
                 system_prompt_content = config["system_prompts"]["default"]
     
-    # Check Token Limit
-    formatted_history = format_history_for_prompt(history, len(history)) # Get all history
-    total_text = system_prompt_content + formatted_history
+    # Calculate Token Usage and Prepare Context
+    system_prompt_tokens = estimate_tokens(system_prompt_content)
+    user_prompt_tokens = estimate_tokens("User Current Request: " + user_prompt)
     
-    if estimate_tokens(total_text) > TOKEN_LIMIT:
-        logger.info(f"Token limit exceeded ({estimate_tokens(total_text)} > {TOKEN_LIMIT}). Triggering summarization.")
-        history = summarize_history(history, cursor_flags)
-        save_history(history, history_file)
-        # Re-format
-        formatted_history = format_history_for_prompt(history, len(history))
+    # If args.history_limit is set, we use it as a hard limit on count.
+    # Otherwise, we use token limit logic.
     
-    # Prepare final context for this request
-    context = format_history_for_prompt(history, args.history_limit)
-    
+    if args.history_limit is not None:
+        # Legacy mode: Use fixed number of messages
+        context_history = history[-args.history_limit:] if args.history_limit > 0 else []
+        formatted_history = format_history_for_prompt(context_history)
+        total_text = system_prompt_content + formatted_history + user_prompt
+        
+        # Check limit just for logging/warning, or maybe trigger compression if it's REALLY big?
+        # But user asked for specific limit.
+        # However, we should still respect TOKEN_LIMIT overall to avoid API errors.
+        if estimate_tokens(total_text) > TOKEN_LIMIT:
+            logger.info(f"Token limit exceeded in fixed-limit mode. Triggering summarization.")
+            history = summarize_history(history, cursor_flags)
+            save_history(history, history_file)
+            # Re-fetch
+            context_history = history[-args.history_limit:] if args.history_limit > 0 else []
+            formatted_history = format_history_for_prompt(context_history)
+    else:
+        # Smart Token Mode
+        # First, check if TOTAL history (all of it) fits.
+        all_history_text = format_history_for_prompt(history)
+        total_estimated = estimate_tokens(all_history_text) + system_prompt_tokens + user_prompt_tokens
+        
+        if total_estimated > TOKEN_LIMIT:
+             # We are over the limit. Trigger compression on the main history first.
+             logger.info(f"Total history ({total_estimated} tokens) exceeds limit. Summarizing...")
+             history = summarize_history(history, cursor_flags)
+             save_history(history, history_file)
+             
+             # Re-calculate with compressed history
+             # Even after compression, we might still be over (if recent messages are huge).
+             # So we proceed to select what fits.
+        
+        # Select what fits
+        context_history, tokens_used = get_history_fitting_token_limit(
+            history, 
+            TOKEN_LIMIT, 
+            system_prompt_tokens, 
+            user_prompt_tokens
+        )
+        formatted_history = format_history_for_prompt(context_history)
+        logger.info(f"Selected {len(context_history)} messages ({tokens_used} tokens) for context.")
+
     full_prompt_parts = []
     if system_prompt_content:
         full_prompt_parts.append(f"System: {system_prompt_content}\n")
     
-    full_prompt_parts.append(context)
+    full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
     
     full_prompt = "".join(full_prompt_parts)
