@@ -6,6 +6,17 @@ import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+import asyncio
+
+# OpenClaw integration imports
+OPENCLAW_AVAILABLE = False
+try:
+    from openclaw_integration import get_openclaw_integration, SessionEntry
+    from mcp_tools import get_mcp_client
+    OPENCLAW_AVAILABLE = True
+except ImportError as e:
+    # Logger will be set up later, just mark as unavailable
+    pass
 
 DEFAULT_HISTORY_FILE = os.path.expanduser("~/.cursor-enhanced-history.json")
 CONFIG_FILE = os.path.expanduser("~/.cursor-enhanced-config.json")
@@ -245,9 +256,57 @@ def main():
     parser.add_argument("--system-prompt", type=str, default="default", help="Name of the system prompt configuration to use")
     parser.add_argument("--chat", type=str, default=None, help="Name of the chat session to use")
     parser.add_argument("--model", type=str, default=None, help="Model to use (e.g., gpt-5, sonnet-4)")
+    parser.add_argument("--agent-id", type=str, default=None, help="Agent ID for multi-agent routing (OpenClaw-style)")
+    parser.add_argument("--session-id", type=str, default=None, help="Session ID for session management")
+    parser.add_argument("--list-tools", action="store_true", help="List available MCP tools")
+    parser.add_argument("--list-skills", action="store_true", help="List available skills")
+    parser.add_argument("--gateway-url", type=str, default=None, help="Gateway WebSocket URL (OpenClaw-style)")
+    parser.add_argument("--enable-openclaw", action="store_true", default=True, help="Enable OpenClaw integration features")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
+
+    # Initialize OpenClaw integration if available
+    openclaw = None
+    mcp_client = None
+    if OPENCLAW_AVAILABLE and args.enable_openclaw:
+        try:
+            from openclaw_integration import get_openclaw_integration
+            from mcp_tools import get_mcp_client
+            openclaw = get_openclaw_integration()
+            mcp_client = get_mcp_client()
+            
+            # Connect to gateway if URL provided
+            if args.gateway_url:
+                asyncio.run(openclaw.connect_gateway(args.gateway_url))
+        except Exception as e:
+            logger.warning(f"Failed to initialize OpenClaw integration: {e}")
+
+    # Handle tool/skill listing
+    if args.list_tools:
+        if mcp_client:
+            tools = mcp_client.discover_mcp_tools()
+            openclaw_tools = openclaw.list_tools() if openclaw else []
+            print("Available MCP Tools:")
+            for tool in tools:
+                print(f"  - {tool.get('name', 'unknown')}: {tool.get('description', '')}")
+            if openclaw_tools:
+                print("\nOpenClaw Tools:")
+                for tool in openclaw_tools:
+                    print(f"  - {tool.get('name', 'unknown')}: {tool.get('description', '')}")
+        else:
+            print("MCP tools not available")
+        return
+    
+    if args.list_skills:
+        if openclaw:
+            skills = openclaw.list_skills()
+            print("Available Skills:")
+            for skill in skills:
+                print(f"  - {skill}")
+        else:
+            print("Skills not available")
+        return
 
     history_file = get_history_file(args.chat)
 
@@ -323,6 +382,31 @@ def main():
     # Log user prompt
     logger.info(f"User Request (Session: {args.chat if args.chat else 'default'}): {user_prompt}")
 
+    # OpenClaw session management
+    session_entry = None
+    if openclaw:
+        try:
+            # Create or get session
+            session_id = args.session_id or args.chat or "default"
+            agent_id = args.agent_id or "main"
+            session_key = f"{agent_id}:{session_id}"
+            
+            existing_session = openclaw.get_session(session_key)
+            if existing_session:
+                session_entry = existing_session
+            else:
+                session_entry = openclaw.create_session(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    channel=args.chat
+                )
+            
+            # Set presence
+            openclaw.presence_manager.set_presence(session_key, True)
+            openclaw.presence_manager.set_typing(session_key, True)
+        except Exception as e:
+            logger.warning(f"Session management error: {e}")
+
     # Load config and history
     history = load_history(history_file)
     
@@ -394,6 +478,32 @@ def main():
     if system_prompt_content:
         full_prompt_parts.append(f"System: {system_prompt_content}\n")
     
+    # Add OpenClaw tools information to system prompt
+    if openclaw and args.enable_openclaw:
+        tools_info = []
+        if mcp_client:
+            mcp_tools = mcp_client.discover_mcp_tools()
+            if mcp_tools:
+                tools_info.append("\n=== Available MCP Tools ===")
+                for tool in mcp_tools[:10]:  # Limit to first 10
+                    tools_info.append(f"- {tool.get('name')}: {tool.get('description', '')}")
+        
+        openclaw_tools = openclaw.list_tools()
+        if openclaw_tools:
+            tools_info.append("\n=== Available OpenClaw Tools ===")
+            for tool in openclaw_tools:
+                tools_info.append(f"- {tool.get('name')}: {tool.get('description', '')}")
+        
+        skills = openclaw.list_skills()
+        if skills:
+            tools_info.append(f"\n=== Available Skills ({len(skills)}) ===")
+            tools_info.append(", ".join(skills[:10]))  # Limit to first 10
+        
+        if tools_info:
+            full_prompt_parts.append("\n".join(tools_info) + "\n")
+            full_prompt_parts.append("\nYou have access to these tools and can use them to help the user. "
+                                   "When you need to use a tool, describe what you're doing.\n\n")
+    
     full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
     
@@ -435,10 +545,29 @@ def main():
         history.append({"role": "agent", "content": agent_response.strip()})
         save_history(history, history_file)
         
+        # Update OpenClaw session
+        if openclaw and session_entry:
+            try:
+                session_key = session_entry.session_key
+                openclaw.presence_manager.set_typing(session_key, False)
+                # Update session metadata if needed
+                if session_entry:
+                    session_entry.metadata = session_entry.metadata or {}
+                    session_entry.metadata["last_interaction"] = datetime.now().isoformat()
+                    openclaw.session_store.set(session_entry.session_key, session_entry)
+            except Exception as e:
+                logger.warning(f"Failed to update session: {e}")
+        
         # Log final result
         logger.info(f"Agent Response: {agent_response.strip()}")
     else:
         logger.error(f"Agent execution failed with return code {process.returncode}")
+        # Update presence on error
+        if openclaw and session_entry:
+            try:
+                openclaw.presence_manager.set_typing(session_entry.session_key, False)
+            except:
+                pass
 
 if __name__ == "__main__":
     main()
