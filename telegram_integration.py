@@ -283,7 +283,10 @@ class TelegramBot:
         old_paired = set(self.paired_users) if hasattr(self, 'paired_users') else set()
         self._load_pairings(force_reload=True)
         
-        logger.debug(f"Checking access for user_id={user_id} (type={type(user_id)}), paired_users={self.paired_users} (types: {[type(u) for u in self.paired_users]})")
+        # Ensure user_id is int for comparison
+        user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
+        
+        logger.info(f"Checking access for user_id={user_id_int} (type={type(user_id_int)}), paired_users={sorted(self.paired_users)} (count={len(self.paired_users)}, types: {[type(u) for u in self.paired_users]})")
         
         if self.config.dm_policy == "open":
             if self.config.allow_from:
@@ -298,20 +301,33 @@ class TelegramBot:
             return True  # Open policy with no allowlist = allow all
         
         # Pairing policy - check if user_id is in paired_users
-        # Ensure user_id is int for comparison
-        user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
-        
         # Check if user_id is in paired_users (all should be ints now)
         is_paired = user_id_int in self.paired_users
         
         if is_paired:
-            logger.info(f"User {user_id_int} is paired, allowing access")
+            logger.info(f"✅ User {user_id_int} is paired, allowing access")
             return True
         else:
-            logger.warning(f"User {user_id_int} (type={type(user_id_int)}) not in paired_users. Current paired_users: {sorted(self.paired_users)} (types: {[type(u) for u in self.paired_users]})")
-            # Also check if maybe chat.id was used instead of user.id
-            # In private chats, chat.id == user.id, but let's be thorough
-            logger.warning(f"Checking if there's a mismatch - user_id={user_id_int}, paired_users={list(self.paired_users)}")
+            logger.error(f"❌ User {user_id_int} (type={type(user_id_int)}) NOT in paired_users. Current paired_users: {sorted(self.paired_users)}")
+            # Double-check by reading file directly
+            if os.path.exists(self.pairing_store_path):
+                try:
+                    with open(self.pairing_store_path, 'r') as f:
+                        direct_data = json.load(f)
+                        direct_paired = direct_data.get("paired_users", [])
+                        logger.error(f"Direct file read shows paired_users: {direct_paired} (types: {[type(u) for u in direct_paired]})")
+                        # Check if user_id is in the direct read
+                        direct_paired_set = set(int(uid) for uid in direct_paired)
+                        if user_id_int in direct_paired_set:
+                            logger.error(f"⚠️  User {user_id_int} IS in file but NOT in memory! Forcing reload...")
+                            # Force reload again
+                            self._load_pairings(force_reload=True)
+                            # Check again
+                            if user_id_int in self.paired_users:
+                                logger.info(f"✅ After forced reload, user {user_id_int} is now in paired_users")
+                                return True
+                except Exception as e:
+                    logger.error(f"Failed to read file directly: {e}")
             return False
     
     async def _handle_start(self, update, context):
