@@ -586,6 +586,13 @@ def main():
             user_prompt_parts.append(arg)
         
         i += 1
+    
+    # Add --force flag if not already present
+    # This allows tool execution (like web_fetch) without explicit user approval
+    has_force = any(arg in ["--force", "-f"] for arg in cursor_flags)
+    if not has_force:
+        cursor_flags.append("--force")
+        logger.debug("Added --force flag to cursor-agent command for automatic tool execution")
             
     user_prompt = " ".join(user_prompt_parts)
     
