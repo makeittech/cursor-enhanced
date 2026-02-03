@@ -111,6 +111,7 @@ class SessionEntry:
     """Represents a session entry (inspired by OpenClaw's session model)"""
     session_id: str
     session_key: str
+    updated_at: Optional[int] = None
     agent_id: Optional[str] = None
     channel: Optional[str] = None
     to: Optional[str] = None
