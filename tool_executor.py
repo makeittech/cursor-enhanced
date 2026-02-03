@@ -47,13 +47,27 @@ async def execute_tool_from_response(
     url_pattern = r'https?://[^\s\)]+'
     urls = re.findall(url_pattern, agent_response, re.IGNORECASE)
     
+    def clean_query(query: str) -> str:
+        """Clean extracted query by removing quotes, parentheses, and trailing punctuation"""
+        if not query:
+            return ""
+        # Strip whitespace
+        query = query.strip()
+        # Remove surrounding quotes (single or double)
+        query = query.strip('"\'')
+        # Remove trailing punctuation and parentheses
+        query = query.rstrip('.,;:!?)')
+        # Remove leading/trailing whitespace again
+        query = query.strip()
+        return query
+    
     # Extract search queries - improved patterns
     search_queries = []
     for pattern in tool_patterns.get('web_search', []):
         matches = re.finditer(pattern, agent_response, re.IGNORECASE)
         for match in matches:
             if match.groups():
-                query = match.group(1).strip()
+                query = clean_query(match.group(1))
                 if query and len(query) > 2:  # Valid query
                     search_queries.append(query)
     
@@ -68,10 +82,10 @@ async def execute_tool_from_response(
         matches = re.finditer(pattern, agent_response, re.IGNORECASE)
         for match in matches:
             if match.groups():
-                query = match.group(1).strip()
+                query = clean_query(match.group(1))
                 # Clean up common prefixes/suffixes
                 query = re.sub(r'^(for|about|on)\s+', '', query, flags=re.IGNORECASE)
-                query = query.strip('.,;:!?')
+                query = query.strip('.,;:!?)')
                 if query and len(query) > 2 and query not in search_queries:
                     search_queries.append(query)
     

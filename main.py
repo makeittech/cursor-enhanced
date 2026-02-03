@@ -153,6 +153,20 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
     results = []
     response_lower = response.lower()
     
+    def clean_query(query: str) -> str:
+        """Clean extracted query by removing quotes, parentheses, and trailing punctuation"""
+        if not query:
+            return ""
+        # Strip whitespace
+        query = query.strip()
+        # Remove surrounding quotes (single or double)
+        query = query.strip('"\'')
+        # Remove trailing punctuation and parentheses
+        query = query.rstrip('.,;:!?)')
+        # Remove leading/trailing whitespace again
+        query = query.strip()
+        return query
+    
     # Check for web search mentions
     web_search_patterns = [
         r"search(?:ing|ed)?\s+(?:the\s+)?web\s+for\s+['\"]?([^'\"]+)['\"]?",
@@ -163,7 +177,7 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
     for pattern in web_search_patterns:
         matches = re.finditer(pattern, response_lower, re.IGNORECASE)
         for match in matches:
-            query = match.group(1).strip()
+            query = clean_query(match.group(1))
             if query and len(query) > 3:  # Reasonable query length
                 try:
                     logger.info(f"Executing web_search tool with query: {query}")
