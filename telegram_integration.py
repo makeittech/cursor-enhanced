@@ -61,6 +61,7 @@ class TelegramBot:
     def _load_pairings(self, force_reload: bool = False):
         """Load paired users and pending pairings from disk"""
         old_paired_count = len(self.paired_users) if hasattr(self, 'paired_users') else 0
+        old_paired_set = set(self.paired_users) if hasattr(self, 'paired_users') else set()
         
         if not hasattr(self, 'paired_users'):
             self.paired_users: set = set()
@@ -75,17 +76,24 @@ class TelegramBot:
                         if "paired_users" in data:
                             # Ensure all user IDs are integers
                             paired_list = data["paired_users"]
-                            new_paired = set(int(uid) for uid in paired_list if str(uid).isdigit())
-                            if new_paired != self.paired_users or force_reload:
+                            new_paired = set()
+                            for uid in paired_list:
+                                try:
+                                    # Try to convert to int (handles both int and string)
+                                    new_paired.add(int(uid))
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Invalid user_id in pairings: {uid} (type: {type(uid)})")
+                            
+                            if new_paired != old_paired_set or force_reload:
                                 self.paired_users = new_paired
                                 if force_reload or len(new_paired) != old_paired_count:
-                                    logger.info(f"Loaded {len(self.paired_users)} paired users (was {old_paired_count})")
+                                    logger.info(f"Loaded {len(self.paired_users)} paired users from disk (was {old_paired_count}, file had: {paired_list})")
                         if "pending_pairings" in data:
                             self.pending_pairings = dict(data["pending_pairings"])
                             if len(self.pending_pairings) > 0:
                                 logger.debug(f"Loaded {len(self.pending_pairings)} pending pairings")
             except Exception as e:
-                logger.warning(f"Failed to load pairings: {e}", exc_info=True)
+                logger.error(f"Failed to load pairings: {e}", exc_info=True)
         else:
             if force_reload:
                 logger.debug(f"Pairing file does not exist: {self.pairing_store_path}")
@@ -252,7 +260,10 @@ class TelegramBot:
         """Check if user is allowed to interact with the bot"""
         # Reload pairings from disk to get latest approvals
         # (in case approval happened while bot was running)
+        old_paired = set(self.paired_users) if hasattr(self, 'paired_users') else set()
         self._load_pairings(force_reload=True)
+        
+        logger.debug(f"Checking access for user_id={user_id} (type={type(user_id)}), paired_users={self.paired_users} (types: {[type(u) for u in self.paired_users]})")
         
         if self.config.dm_policy == "open":
             if self.config.allow_from:
@@ -267,13 +278,17 @@ class TelegramBot:
             return True  # Open policy with no allowlist = allow all
         
         # Pairing policy - check if user_id is in paired_users
-        # paired_users stores int user IDs
-        is_paired = user_id in self.paired_users
+        # Ensure user_id is int for comparison
+        user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
+        
+        # Check both as int and as string (in case of type mismatch)
+        is_paired = (user_id_int in self.paired_users) or (str(user_id_int) in [str(uid) for uid in self.paired_users])
+        
         if is_paired:
-            logger.debug(f"User {user_id} is paired, allowing access")
+            logger.info(f"User {user_id_int} is paired, allowing access")
             return True
         else:
-            logger.debug(f"User {user_id} not in paired_users (current: {self.paired_users})")
+            logger.warning(f"User {user_id_int} (type={type(user_id_int)}) not in paired_users. Current paired_users: {self.paired_users} (types: {[type(u) for u in self.paired_users]})")
             return False
     
     async def _handle_start(self, update, context):
