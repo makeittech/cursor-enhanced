@@ -664,7 +664,10 @@ def main():
             full_prompt_parts.append("\n".join(tools_info) + "\n")
             full_prompt_parts.append("\n**IMPORTANT: You have access to these tools and can use them to help the user.**\n")
             full_prompt_parts.append("When the user asks what you can do or what tools you have, list ALL available tools from above.\n")
-            full_prompt_parts.append("You can use these tools by describing what you want to do - the system will execute them for you.\n\n")
+            full_prompt_parts.append("\n**TOOL USAGE FORMAT:**\n")
+            full_prompt_parts.append("To use a tool, describe what you want to do in your response. The system will automatically detect and execute tools based on your description.\n")
+            full_prompt_parts.append("For example, if you want to fetch a webpage, say: 'I'll fetch the webpage at [URL]' or 'Let me search the web for [query]'.\n")
+            full_prompt_parts.append("The system will execute the appropriate tool and provide you with the results.\n\n")
     
     full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
@@ -700,6 +703,20 @@ def main():
             print(line, end="", file=sys.stderr)
             
     process.wait()
+    
+    # Execute tools mentioned in agent response
+    if process.returncode == 0 and openclaw and args.enable_openclaw:
+        try:
+            from tool_executor import execute_tool_from_response
+            updated_response, tool_results = asyncio.run(
+                execute_tool_from_response(agent_response, openclaw)
+            )
+            if tool_results:
+                logger.info(f"Executed {len(tool_results)} tools from agent response")
+                # Use updated response with tool results
+                agent_response = updated_response
+        except Exception as e:
+            logger.warning(f"Failed to execute tools from response: {e}")
     
     if process.returncode == 0:
         # Save to history
