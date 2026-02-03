@@ -47,13 +47,33 @@ async def execute_tool_from_response(
     url_pattern = r'https?://[^\s\)]+'
     urls = re.findall(url_pattern, agent_response, re.IGNORECASE)
     
-    # Extract search queries
+    # Extract search queries - improved patterns
     search_queries = []
     for pattern in tool_patterns.get('web_search', []):
         matches = re.finditer(pattern, agent_response, re.IGNORECASE)
         for match in matches:
             if match.groups():
-                search_queries.append(match.group(1).strip())
+                query = match.group(1).strip()
+                if query and len(query) > 2:  # Valid query
+                    search_queries.append(query)
+    
+    # Also look for phrases like "funny cat videos", "search for X", etc.
+    # Pattern: "search(ing)? (the web )?for [phrase]"
+    additional_patterns = [
+        r'search(?:ing)?\s+(?:the\s+web\s+)?for\s+([^\.\n]+?)(?:\.|$|\n)',
+        r'looking\s+up\s+([^\.\n]+?)(?:\.|$|\n)',
+        r'find(?:ing)?\s+([^\.\n]+?)(?:\.|$|\n)',
+    ]
+    for pattern in additional_patterns:
+        matches = re.finditer(pattern, agent_response, re.IGNORECASE)
+        for match in matches:
+            if match.groups():
+                query = match.group(1).strip()
+                # Clean up common prefixes/suffixes
+                query = re.sub(r'^(for|about|on)\s+', '', query, flags=re.IGNORECASE)
+                query = query.strip('.,;:!?')
+                if query and len(query) > 2 and query not in search_queries:
+                    search_queries.append(query)
     
     # Execute web_fetch if URLs found
     for url in urls[:3]:  # Limit to 3 URLs
@@ -80,12 +100,18 @@ async def execute_tool_from_response(
             tool_results.append({"tool": "web_search", "query": query, "result": result})
             
             # Append result to response
-            if "error" not in result:
-                updated_response += f"\n\n[Tool Result: web_search for '{query}']\n{result.get('note', 'Search completed')}"
+            if result and "error" not in result:
+                # Web search is a placeholder, so provide helpful message
+                note = result.get('note', 'Web search completed')
+                updated_response += f"\n\n[Tool Result: web_search for '{query}']\n{note}\nNote: Web search requires API integration. For now, you can suggest the user search manually or use web_fetch with specific URLs."
+            elif result:
+                error_msg = result.get('error', 'Unknown error')
+                updated_response += f"\n\n[Tool Error: web_search for '{query}']\n{error_msg}"
             else:
-                updated_response += f"\n\n[Tool Error: web_search for '{query}' - {result.get('error', 'Unknown error')}]"
+                updated_response += f"\n\n[Tool Note: web_search for '{query}']\nWeb search tool executed but returned no results. This is expected as web search requires API integration."
         except Exception as e:
-            logger.error(f"Failed to execute web_search for {query}: {e}")
+            logger.error(f"Failed to execute web_search for {query}: {e}", exc_info=True)
             tool_results.append({"tool": "web_search", "query": query, "error": str(e)})
+            updated_response += f"\n\n[Tool Error: web_search for '{query}']\nError: {str(e)}"
     
     return updated_response, tool_results
