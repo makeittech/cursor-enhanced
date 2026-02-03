@@ -317,16 +317,6 @@ class TelegramBot:
             return True  # Open policy with no allowlist = allow all
         
         logger.info(f"Using PAIRING policy - checking paired_users")
-            if self.config.allow_from:
-                if "*" in self.config.allow_from:
-                    return True
-                user_str = str(user_id)
-                username_lower = username.lower() if username else None
-                for allowed in self.config.allow_from:
-                    if user_str == allowed or (username_lower and username_lower == allowed.lower()):
-                        return True
-                return False
-            return True  # Open policy with no allowlist = allow all
         
         # Pairing policy - check if user_id is in paired_users
         # Check if user_id is in paired_users (all should be ints now)
