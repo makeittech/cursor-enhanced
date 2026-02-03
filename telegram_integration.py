@@ -161,15 +161,22 @@ class TelegramBot:
                 try:
                     with open(self.pairing_store_path, 'r') as f:
                         data = json.load(f)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to read existing pairing file: {e}")
+            
+            # Preserve paired_users if they exist
+            if "paired_users" not in data:
+                data["paired_users"] = list(self.paired_users) if self.paired_users else []
+            
             if "pending_pairings" not in data:
                 data["pending_pairings"] = {}
             data["pending_pairings"][chat_id] = code
+            
             with open(self.pairing_store_path, 'w') as f:
                 json.dump(data, f, indent=2)
+            logger.info(f"Saved pending pairing: chat_id={chat_id}, code={code}")
         except Exception as e:
-            logger.warning(f"Failed to save pending pairing: {e}")
+            logger.error(f"Failed to save pending pairing: {e}", exc_info=True)
         
     async def start(self):
         """Start the Telegram bot"""

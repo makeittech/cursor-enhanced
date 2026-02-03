@@ -264,11 +264,32 @@ def main():
     parser.add_argument("--enable-openclaw", action="store_true", default=True, help="Enable OpenClaw integration features")
     parser.add_argument("--telegram", action="store_true", help="Start Telegram bot")
     parser.add_argument("--telegram-approve", type=str, metavar="CODE", help="Approve Telegram pairing code")
+    parser.add_argument("--telegram-list-pending", action="store_true", help="List pending Telegram pairing codes")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
     
     # Handle Telegram-specific commands
+    if args.telegram_list_pending:
+        # List pending pairings
+        pairing_file = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+        if os.path.exists(pairing_file):
+            try:
+                with open(pairing_file, 'r') as f:
+                    data = json.load(f)
+                    pending = data.get("pending_pairings", {})
+                    if pending:
+                        print("Pending pairing codes:")
+                        for chat_id, code in pending.items():
+                            print(f"  Chat {chat_id}: {code}")
+                    else:
+                        print("No pending pairings found.")
+            except Exception as e:
+                print(f"Error reading pairing file: {e}")
+        else:
+            print("No pairing file found. Send /start to your bot to generate a pairing code.")
+        return
+    
     if args.telegram_approve:
         # Approve Telegram pairing
         try:
