@@ -273,22 +273,51 @@ def main():
         # Approve Telegram pairing
         try:
             from telegram_integration import load_telegram_config, TelegramBot, TelegramConfig
+            import json as json_module
+            
             config = load_telegram_config()
             if not config:
                 print("Error: Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
                 sys.exit(1)
             
+            # Show pending codes for debugging
+            pairing_file = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+            if os.path.exists(pairing_file):
+                try:
+                    with open(pairing_file, 'r') as f:
+                        pairing_data = json_module.load(f)
+                        pending = pairing_data.get("pending_pairings", {})
+                        if pending:
+                            print(f"Pending pairings found: {list(pending.values())}")
+                except:
+                    pass
+            
             # Create a temporary bot instance to approve pairing
             # We don't need to start it, just use the approve method
             bot = TelegramBot(config, openclaw_integration=None)
-            if bot.approve_pairing(args.telegram_approve):
+            code_upper = args.telegram_approve.upper()
+            if bot.approve_pairing(code_upper):
                 print(f"✅ Pairing code {args.telegram_approve} approved successfully!")
                 print("You can now send messages to the bot.")
                 sys.exit(0)
             else:
                 print(f"❌ Pairing code {args.telegram_approve} not found or already used.")
                 print("Make sure you're using the exact code shown by the bot.")
-                print(f"   Check ~/.cursor-enhanced/telegram-pairings.json for pending codes.")
+                if os.path.exists(pairing_file):
+                    try:
+                        with open(pairing_file, 'r') as f:
+                            data = json_module.load(f)
+                            pending = data.get("pending_pairings", {})
+                            if pending:
+                                print(f"\nAvailable pending codes: {', '.join(pending.values())}")
+                            else:
+                                print("\nNo pending pairings found in file.")
+                    except Exception as e:
+                        print(f"\nCould not read pairing file: {e}")
+                else:
+                    print(f"\nPairing file does not exist: {pairing_file}")
+                    print("The bot may not have saved the pairing code yet.")
+                    print("Make sure the bot is running and you've sent /start to it.")
                 sys.exit(1)
         except ImportError as e:
             print(f"Telegram integration not available: {e}")

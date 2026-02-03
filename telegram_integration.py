@@ -77,55 +77,78 @@ class TelegramBot:
         """Save paired users to disk"""
         try:
             os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
+            data = {}
+            if os.path.exists(self.pairing_store_path):
+                try:
+                    with open(self.pairing_store_path, 'r') as f:
+                        data = json.load(f)
+                except:
+                    pass
+            data["paired_users"] = list(self.paired_users)
+            # Preserve pending_pairings if they exist
+            if "pending_pairings" not in data:
+                data["pending_pairings"] = {}
             with open(self.pairing_store_path, 'w') as f:
-                json.dump({"paired_users": list(self.paired_users)}, f, indent=2)
+                json.dump(data, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save pairings: {e}")
     
     def approve_pairing(self, code: str) -> bool:
         """Approve a pairing code"""
-        # Find the chat_id for this code
+        # First check in-memory pending pairings
         chat_id = None
         for cid, pairing_code in self.pending_pairings.items():
-            if pairing_code == code:
+            if pairing_code.upper() == code.upper():  # Case-insensitive
                 chat_id = cid
                 break
         
-        if not chat_id:
-            # Also check stored pending pairings
-            if os.path.exists(self.pairing_store_path):
-                try:
-                    with open(self.pairing_store_path, 'r') as f:
-                        data = json.load(f)
-                        pending = data.get("pending_pairings", {})
-                        for cid, pairing_code in pending.items():
-                            if pairing_code == code:
-                                chat_id = cid
-                                break
-                except:
-                    pass
+        # If not found in memory, check stored pending pairings
+        if not chat_id and os.path.exists(self.pairing_store_path):
+            try:
+                with open(self.pairing_store_path, 'r') as f:
+                    data = json.load(f)
+                    pending = data.get("pending_pairings", {})
+                    for cid, pairing_code in pending.items():
+                        if pairing_code.upper() == code.upper():  # Case-insensitive
+                            chat_id = cid
+                            # Also update in-memory
+                            self.pending_pairings[chat_id] = pairing_code
+                            break
+            except Exception as e:
+                logger.warning(f"Failed to load pending pairings: {e}")
         
         if chat_id:
             try:
                 user_id = int(chat_id)
                 self.paired_users.add(user_id)
-                self._save_pairings()
-                # Remove from pending
+                
+                # Remove from pending (both memory and disk)
                 self.pending_pairings.pop(chat_id, None)
-                # Update stored pending
-                if os.path.exists(self.pairing_store_path):
-                    try:
+                
+                # Update stored file
+                try:
+                    data = {}
+                    if os.path.exists(self.pairing_store_path):
                         with open(self.pairing_store_path, 'r') as f:
                             data = json.load(f)
-                        data["pending_pairings"] = {k: v for k, v in data.get("pending_pairings", {}).items() if k != chat_id}
-                        with open(self.pairing_store_path, 'w') as f:
-                            json.dump(data, f, indent=2)
-                    except:
-                        pass
-                logger.info(f"Approved pairing for user {user_id}")
+                    
+                    # Update both paired_users and pending_pairings
+                    data["paired_users"] = list(self.paired_users)
+                    if "pending_pairings" in data:
+                        data["pending_pairings"] = {k: v for k, v in data["pending_pairings"].items() if k != chat_id}
+                    
+                    os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
+                    with open(self.pairing_store_path, 'w') as f:
+                        json.dump(data, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to update pairing store: {e}")
+                    # Still save paired users
+                    self._save_pairings()
+                
+                logger.info(f"Approved pairing for user {user_id} (code: {code})")
                 return True
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.error(f"Invalid chat_id format: {chat_id}, error: {e}")
         
         return False
     
@@ -224,7 +247,10 @@ class TelegramBot:
             else:
                 # Generate pairing code
                 code = self._generate_pairing_code()
-                self.pending_pairings[str(chat.id)] = code
+                chat_id_str = str(chat.id)
+                self.pending_pairings[chat_id_str] = code
+                self._save_pending_pairing(chat_id_str, code)
+                logger.info(f"Generated pairing code {code} for chat {chat_id_str}")
                 await update.message.reply_text(
                     f"Hello! To start using this bot, please approve the pairing code: **{code}**\n\n"
                     f"Run this command on your system:\n"
