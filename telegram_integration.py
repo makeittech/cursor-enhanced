@@ -163,8 +163,8 @@ class TelegramBot:
                             data = json.load(f)
                     
                     # Update both paired_users and pending_pairings
-                    # Ensure paired_users are stored as list of integers (or strings that can be converted)
-                    data["paired_users"] = [int(uid) for uid in self.paired_users]
+                    # Ensure paired_users are stored as list of integers
+                    data["paired_users"] = sorted([int(uid) for uid in self.paired_users])
                     if "pending_pairings" in data:
                         data["pending_pairings"] = {k: v for k, v in data["pending_pairings"].items() if k != chat_id}
                     else:
@@ -173,7 +173,7 @@ class TelegramBot:
                     os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
                     with open(self.pairing_store_path, 'w') as f:
                         json.dump(data, f, indent=2)
-                    logger.info(f"Saved approval: user_id={user_id} to file")
+                    logger.info(f"Saved approval: user_id={user_id} (chat_id={chat_id}) to file. File now has: {data.get('paired_users', [])}")
                 except Exception as e:
                     logger.error(f"Failed to update pairing store: {e}", exc_info=True)
                     # Still save paired users using the simpler method
@@ -364,11 +364,16 @@ You can also just send me messages and I'll respond using my available tools."""
             return
         
         # Check if user is allowed
-        if chat.type == "private" and not self._is_allowed_user(user.id, user.username):
+        logger.debug(f"Checking message from user_id={user.id} (type={type(user.id)}), chat_id={chat.id} (type={type(chat.id)})")
+        is_allowed = self._is_allowed_user(user.id, user.username)
+        logger.debug(f"User {user.id} allowed status: {is_allowed}")
+        
+        if chat.type == "private" and not is_allowed:
             # Check if they have a pending pairing
             chat_id_str = str(chat.id)
             if chat_id_str in self.pending_pairings:
                 code = self.pending_pairings[chat_id_str]
+                logger.info(f"User {user.id} has pending pairing {code}, reminding them")
                 await message.reply_text(
                     f"Please approve the pairing code first: **{code}**\n\n"
                     f"Run: `cursor-enhanced --telegram-approve {code}`",
@@ -378,6 +383,7 @@ You can also just send me messages and I'll respond using my available tools."""
                 code = self._generate_pairing_code()
                 self.pending_pairings[chat_id_str] = code
                 self._save_pending_pairing(chat_id_str, code)
+                logger.info(f"Generated new pairing code {code} for user {user.id} (chat {chat_id_str})")
                 await message.reply_text(
                     f"Pairing required. Code: **{code}**\n\n"
                     f"Run: `cursor-enhanced --telegram-approve {code}`",
