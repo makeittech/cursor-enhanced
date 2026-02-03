@@ -52,8 +52,97 @@ class TelegramBot:
         self.openclaw = openclaw_integration
         self.application = None
         self.bot = None
-        self.paired_users: set = set()  # Users who have been approved
+        self.pairing_store_path = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+        self._load_pairings()
         self.pending_pairings: Dict[str, str] = {}  # chat_id -> pairing_code
+    
+    def _load_pairings(self):
+        """Load paired users from disk"""
+        self.paired_users: set = set()
+        if os.path.exists(self.pairing_store_path):
+            try:
+                with open(self.pairing_store_path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and "paired_users" in data:
+                        self.paired_users = set(data["paired_users"])
+                        logger.info(f"Loaded {len(self.paired_users)} paired users")
+            except Exception as e:
+                logger.warning(f"Failed to load pairings: {e}")
+    
+    def _save_pairings(self):
+        """Save paired users to disk"""
+        try:
+            os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
+            with open(self.pairing_store_path, 'w') as f:
+                json.dump({"paired_users": list(self.paired_users)}, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save pairings: {e}")
+    
+    def approve_pairing(self, code: str) -> bool:
+        """Approve a pairing code"""
+        # Find the chat_id for this code
+        chat_id = None
+        for cid, pairing_code in self.pending_pairings.items():
+            if pairing_code == code:
+                chat_id = cid
+                break
+        
+        if not chat_id:
+            # Also check stored pending pairings
+            if os.path.exists(self.pairing_store_path):
+                try:
+                    with open(self.pairing_store_path, 'r') as f:
+                        data = json.load(f)
+                        pending = data.get("pending_pairings", {})
+                        for cid, pairing_code in pending.items():
+                            if pairing_code == code:
+                                chat_id = cid
+                                break
+                except:
+                    pass
+        
+        if chat_id:
+            try:
+                user_id = int(chat_id)
+                self.paired_users.add(user_id)
+                self._save_pairings()
+                # Remove from pending
+                self.pending_pairings.pop(chat_id, None)
+                # Update stored pending
+                if os.path.exists(self.pairing_store_path):
+                    try:
+                        with open(self.pairing_store_path, 'r') as f:
+                            data = json.load(f)
+                        data["pending_pairings"] = {k: v for k, v in data.get("pending_pairings", {}).items() if k != chat_id}
+                        with open(self.pairing_store_path, 'w') as f:
+                            json.dump(data, f, indent=2)
+                    except:
+                        pass
+                logger.info(f"Approved pairing for user {user_id}")
+                return True
+            except ValueError:
+                pass
+        
+        return False
+    
+    def _save_pending_pairing(self, chat_id: str, code: str):
+        """Save pending pairing to disk"""
+        try:
+            os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
+            data = {}
+            if os.path.exists(self.pairing_store_path):
+                try:
+                    with open(self.pairing_store_path, 'r') as f:
+                        data = json.load(f)
+                except:
+                    pass
+            if "pending_pairings" not in data:
+                data["pending_pairings"] = {}
+            data["pending_pairings"][chat_id] = code
+            with open(self.pairing_store_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save pending pairing: {e}")
         
     async def start(self):
         """Start the Telegram bot"""
@@ -77,8 +166,10 @@ class TelegramBot:
         logger.info("Starting Telegram bot...")
         await self.application.initialize()
         await self.application.start()
-        await self.application.updater.start_polling()
+        await self.application.updater.start_polling(drop_pending_updates=True)
         logger.info("Telegram bot started and polling for messages")
+        print("✅ Telegram bot is running and listening for messages...")
+        print("   Send /start to your bot to begin pairing.")
     
     async def stop(self):
         """Stop the Telegram bot"""
@@ -197,9 +288,10 @@ You can also just send me messages and I'll respond using my available tools."""
             else:
                 code = self._generate_pairing_code()
                 self.pending_pairings[chat_id_str] = code
+                self._save_pending_pairing(chat_id_str, code)
                 await message.reply_text(
                     f"Pairing required. Code: **{code}**\n\n"
-                    f"Run: `cursor-enhanced telegram approve {code}`",
+                    f"Run: `cursor-enhanced --telegram-approve {code}`",
                     parse_mode="Markdown"
                 )
             return
@@ -212,50 +304,82 @@ You can also just send me messages and I'll respond using my available tools."""
             await context.bot.send_chat_action(chat_id=chat.id, action="typing")
             
             # Route message through cursor-enhanced
-            # This would need to integrate with the main.py logic
-            # For now, we'll create a simple response
             response = await self._process_message(user_message, user.id, chat.id)
             
-            # Send response
-            await message.reply_text(response)
+            # Send response (split if too long for Telegram's 4096 char limit)
+            max_length = 4096
+            if len(response) > max_length:
+                # Split into chunks
+                chunks = [response[i:i+max_length] for i in range(0, len(response), max_length-100)]
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await message.reply_text(chunk)
+                    else:
+                        await message.reply_text(f"[Continued...]\n{chunk}")
+            else:
+                await message.reply_text(response)
         except Exception as e:
-            logger.error(f"Error processing Telegram message: {e}")
+            logger.error(f"Error processing Telegram message: {e}", exc_info=True)
             await message.reply_text(f"Sorry, I encountered an error: {str(e)}")
     
     async def _process_message(self, message: str, user_id: int, chat_id: int) -> str:
         """Process a message through cursor-enhanced"""
         import subprocess
         import os
+        import sys
         
-        # Route message through cursor-agent
-        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
-        
-        # Build command with OpenClaw enabled
-        cmd = ["bash", cursor_agent_path, "--enable-openclaw", "-p", message]
+        # Get the path to cursor-enhanced (the current script)
+        # We'll call cursor-enhanced itself with the message
+        cursor_enhanced_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
+        if not os.path.exists(cursor_enhanced_path):
+            # Try to find it in PATH
+            import shutil
+            cursor_enhanced_path = shutil.which("cursor-enhanced")
+            if not cursor_enhanced_path:
+                # Fallback: use python to run main.py
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                main_py = os.path.join(os.path.dirname(script_dir), "main.py")
+                if os.path.exists(main_py):
+                    cursor_enhanced_path = "python3"
+                    cmd = [cursor_enhanced_path, main_py, "--enable-openclaw", "-p", message]
+                else:
+                    return "Error: Could not find cursor-enhanced. Please check installation."
+            else:
+                cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
+        else:
+            cmd = ["bash", cursor_enhanced_path, "--enable-openclaw", "-p", message]
         
         try:
-            # Run cursor-agent and capture output
+            logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
+            
+            # Run cursor-enhanced and capture output
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=120
+                timeout=120,
+                cwd=os.path.expanduser("~")
             )
             
             if result.returncode == 0:
                 response = result.stdout.strip()
                 if not response:
                     response = "I processed your message but didn't get a response."
+                logger.info(f"Response generated: {len(response)} characters")
                 return response
             else:
-                error_msg = result.stderr.strip() or "Unknown error"
-                logger.error(f"cursor-agent error: {error_msg}")
-                return f"Sorry, I encountered an error processing your message: {error_msg}"
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                logger.error(f"cursor-enhanced error (code {result.returncode}): {error_msg}")
+                # Try to extract useful error message
+                if "Error" in error_msg or "error" in error_msg.lower():
+                    return f"Sorry, I encountered an error: {error_msg[:500]}"
+                return "Sorry, I encountered an error processing your message. Please try again."
         except subprocess.TimeoutExpired:
-            return "Sorry, the request timed out. Please try again."
+            logger.warning("Message processing timed out")
+            return "Sorry, the request timed out. Please try again with a simpler question."
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
 
 def load_telegram_config(config_file: Optional[str] = None) -> Optional[TelegramConfig]:
@@ -306,9 +430,13 @@ async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_int
     bot = TelegramBot(config, openclaw_integration)
     await bot.start()
     
-    # Keep running
+    # Keep running until interrupted
     try:
+        # Keep the event loop running
+        print("Press Ctrl+C to stop the bot...")
         await asyncio.Event().wait()  # Wait indefinitely
     except KeyboardInterrupt:
+        print("\nStopping Telegram bot...")
         logger.info("Stopping Telegram bot...")
         await bot.stop()
+        print("Telegram bot stopped.")

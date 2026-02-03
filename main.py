@@ -272,16 +272,25 @@ def main():
     if args.telegram_approve:
         # Approve Telegram pairing
         try:
-            from telegram_integration import load_telegram_config
+            from telegram_integration import load_telegram_config, TelegramBot, TelegramConfig
             config = load_telegram_config()
-            if config:
-                # In a full implementation, this would update the pairing store
-                print(f"Pairing code {args.telegram_approve} approved.")
-                print("Note: Full pairing implementation requires persistent storage.")
+            if not config:
+                print("Error: Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
+                return
+            
+            # Create a temporary bot instance to approve pairing
+            # We don't need to start it, just use the approve method
+            bot = TelegramBot(config, openclaw_integration=None)
+            if bot.approve_pairing(args.telegram_approve):
+                print(f"✅ Pairing code {args.telegram_approve} approved successfully!")
+                print("You can now send messages to the bot.")
             else:
-                print("Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
+                print(f"❌ Pairing code {args.telegram_approve} not found or already used.")
+                print("Make sure you're using the exact code shown by the bot.")
         except ImportError:
             print("Telegram integration not available. Install with: pip install python-telegram-bot")
+        except Exception as e:
+            print(f"Error approving pairing: {e}")
         return
     
     if args.telegram:
