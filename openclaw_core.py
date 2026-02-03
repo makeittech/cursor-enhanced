@@ -502,6 +502,11 @@ class SkillsManager:
         
         return list(skill_map.values())
     
+    def list_skills(self) -> List[str]:
+        """List available skill names"""
+        entries = self.load_skill_entries()
+        return [entry.name for entry in entries]
+    
     def build_skill_snapshot(self, config: Optional[Dict[str, Any]] = None, 
                            skill_filter: Optional[List[str]] = None) -> SkillSnapshot:
         """Build skill snapshot"""

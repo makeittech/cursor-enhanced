@@ -254,9 +254,9 @@ else:
                 return {"error": str(e)}
 
 # Skills Platform (OpenClaw-style)
-# Use OpenClaw core SkillsManager if available, otherwise fallback
+    # Use OpenClaw core SkillsManager if available, otherwise fallback
 if OPENCLAW_CORE_AVAILABLE:
-    # Use the core SkillsManager directly
+    # Use the core SkillsManager directly - it has list_skills() method
     pass
 else:
     # Fallback implementation
@@ -277,16 +277,17 @@ else:
         
         def list_skills(self) -> List[str]:
             """List available skills"""
-            if not os.path.exists(self.skills_dir):
-                return []
-            
+            # Fallback: simple directory listing
             skills = []
-            for item in os.listdir(self.skills_dir):
-                skill_path = os.path.join(self.skills_dir, item)
-                if os.path.isdir(skill_path):
-                    skill_md = os.path.join(skill_path, "SKILL.md")
-                    if os.path.exists(skill_md):
-                        skills.append(item)
+            
+            # Check workspace skills
+            if os.path.exists(self.skills_dir):
+                for item in os.listdir(self.skills_dir):
+                    skill_path = os.path.join(self.skills_dir, item)
+                    if os.path.isdir(skill_path):
+                        skill_md = os.path.join(skill_path, "SKILL.md")
+                        if os.path.exists(skill_md):
+                            skills.append(item)
             
             return skills
         
