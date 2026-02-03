@@ -19,9 +19,16 @@ try:
     from telegram import Update, Bot
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
     TELEGRAM_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     TELEGRAM_AVAILABLE = False
-    logger.warning("python-telegram-bot not available. Install with: pip install python-telegram-bot")
+    Update = None
+    Bot = None
+    Application = None
+    CommandHandler = None
+    MessageHandler = None
+    filters = None
+    ContextTypes = None
+    logger.warning(f"python-telegram-bot not available: {e}. Install with: pip install python-telegram-bot")
 
 @dataclass
 class TelegramConfig:
@@ -38,7 +45,7 @@ class TelegramBot:
     """Telegram bot for cursor-enhanced"""
     
     def __init__(self, config: TelegramConfig, openclaw_integration=None):
-        if not TELEGRAM_AVAILABLE:
+        if not TELEGRAM_AVAILABLE or Update is None:
             raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
         
         self.config = config
@@ -107,7 +114,7 @@ class TelegramBot:
         
         return False
     
-    async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_start(self, update, context):
         """Handle /start command"""
         user = update.effective_user
         chat = update.effective_chat
@@ -136,7 +143,7 @@ class TelegramBot:
                 "Mention me or reply to my messages to interact."
             )
     
-    async def _handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_help(self, update, context):
         """Handle /help command"""
         help_text = """Available commands:
 /start - Start the bot
@@ -147,7 +154,7 @@ You can also just send me messages and I'll respond using my available tools."""
         
         await update.message.reply_text(help_text)
     
-    async def _handle_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_status(self, update, context):
         """Handle /status command"""
         status_parts = ["**Cursor-Enhanced Status**\n"]
         
@@ -167,7 +174,7 @@ You can also just send me messages and I'll respond using my available tools."""
         
         await update.message.reply_text("\n".join(status_parts), parse_mode="Markdown")
     
-    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_message(self, update, context):
         """Handle incoming messages"""
         user = update.effective_user
         chat = update.effective_chat
@@ -287,7 +294,7 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
 
 async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None):
     """Run the Telegram bot"""
-    if not TELEGRAM_AVAILABLE:
+    if not TELEGRAM_AVAILABLE or Update is None:
         raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
     
     if config is None:
