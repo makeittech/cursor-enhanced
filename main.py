@@ -167,7 +167,9 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
             if query and len(query) > 3:  # Reasonable query length
                 try:
                     logger.info(f"Executing web_search tool with query: {query}")
-                    result = await openclaw.tool_registry.execute("web_search", query=query)
+                    # ToolRegistry.execute expects (tool_name, action, params)
+                    # For web_search, action is empty string, params is a dict
+                    result = await openclaw.tool_registry.execute("web_search", "", {"query": query})
                     if result and not result.get("error"):
                         results.append(f"Web search for '{query}': {json.dumps(result, indent=2)}")
                     else:
@@ -190,7 +192,9 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
             if url:
                 try:
                     logger.info(f"Executing web_fetch tool with URL: {url}")
-                    result = await openclaw.tool_registry.execute("web_fetch", url=url)
+                    # ToolRegistry.execute expects (tool_name, action, params)
+                    # For web_fetch, action is empty string, params is a dict
+                    result = await openclaw.tool_registry.execute("web_fetch", "", {"url": url})
                     if result and not result.get("error"):
                         content = result.get("content", "")[:1000]  # Limit content length
                         results.append(f"Fetched {url}: {content}...")
