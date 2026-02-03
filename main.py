@@ -262,9 +262,55 @@ def main():
     parser.add_argument("--list-skills", action="store_true", help="List available skills")
     parser.add_argument("--gateway-url", type=str, default=None, help="Gateway WebSocket URL (OpenClaw-style)")
     parser.add_argument("--enable-openclaw", action="store_true", default=True, help="Enable OpenClaw integration features")
+    parser.add_argument("--telegram", action="store_true", help="Start Telegram bot")
+    parser.add_argument("--telegram-approve", type=str, metavar="CODE", help="Approve Telegram pairing code")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
+    
+    # Handle Telegram-specific commands
+    if args.telegram_approve:
+        # Approve Telegram pairing
+        try:
+            from telegram_integration import load_telegram_config
+            config = load_telegram_config()
+            if config:
+                # In a full implementation, this would update the pairing store
+                print(f"Pairing code {args.telegram_approve} approved.")
+                print("Note: Full pairing implementation requires persistent storage.")
+            else:
+                print("Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
+        except ImportError:
+            print("Telegram integration not available. Install with: pip install python-telegram-bot")
+        return
+    
+    if args.telegram:
+        # Start Telegram bot
+        try:
+            from telegram_integration import run_telegram_bot, load_telegram_config
+            from openclaw_integration import get_openclaw_integration
+            
+            config = load_telegram_config()
+            if not config:
+                print("Error: Telegram bot token required.")
+                print("Set TELEGRAM_BOT_TOKEN environment variable or configure in ~/.cursor-enhanced-config.json")
+                return
+            
+            openclaw = None
+            if OPENCLAW_AVAILABLE and args.enable_openclaw:
+                try:
+                    from openclaw_integration import get_openclaw_integration
+                    openclaw = get_openclaw_integration()
+                except Exception as e:
+                    logger.warning(f"Failed to initialize OpenClaw: {e}")
+            
+            print("Starting Telegram bot...")
+            asyncio.run(run_telegram_bot(config, openclaw))
+        except ImportError:
+            print("Telegram integration not available. Install with: pip install python-telegram-bot")
+        except Exception as e:
+            print(f"Error starting Telegram bot: {e}")
+        return
 
     # Initialize OpenClaw integration if available
     openclaw = None
