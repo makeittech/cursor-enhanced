@@ -15,13 +15,9 @@ import json
 import time
 import uuid
 import asyncio
-import hashlib
-import fcntl
-import tempfile
-from typing import Dict, List, Optional, Any, Callable, Union
-from dataclasses import dataclass, asdict, field
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass, asdict
 from enum import Enum
-from pathlib import Path
 import logging
 
 logger = logging.getLogger("cursor_enhanced.openclaw_core")
@@ -171,10 +167,20 @@ def estimate_usage_cost(usage: Optional[UsageTotals], cost: Optional[ModelCostCo
         cache_write_tokens * cost.cache_write
     ) / 1_000_000
     
-    if not isinstance(total, (int, float)) or not (isinstance(total, float) and total.is_integer() or True):
+    if not isinstance(total, (int, float)) or not (isinstance(total, (int, float))):
         return None
     
-    return total
+    # Check if finite (Python 3.7+ has math.isfinite, but we'll use a simpler check)
+    try:
+        import math
+        if not math.isfinite(total):
+            return None
+    except (ImportError, AttributeError):
+        # Fallback: check if it's a normal number (not inf or nan)
+        if isinstance(total, float) and (total != total or total == float('inf') or total == float('-inf')):
+            return None
+    
+    return float(total)
 
 # ============================================================================
 # Session Store (from config/sessions/store.ts)
@@ -469,9 +475,14 @@ class SkillsManager:
                             parts = content.split("---", 2)
                             if len(parts) >= 3:
                                 try:
-                                    import yaml
-                                    frontmatter = yaml.safe_load(parts[1]) or {}
-                                except:
+                                    try:
+                                        import yaml
+                                        frontmatter = yaml.safe_load(parts[1]) or {}
+                                    except ImportError:
+                                        # YAML not available, skip frontmatter parsing
+                                        pass
+                                except Exception:
+                                    # Invalid YAML, skip
                                     pass
                         
                         entry = SkillEntry(
@@ -530,6 +541,7 @@ try:
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
     WEBSOCKETS_AVAILABLE = False
+    websockets = None  # type: ignore
 
 class GatewayClient:
     """Gateway WebSocket client (ported from OpenClaw)"""
@@ -618,6 +630,32 @@ class GatewayClient:
 # Tool Implementations (from agents/tools/*.ts)
 # ============================================================================
 
+# Web tools will be imported separately to avoid circular dependencies
+try:
+    from openclaw_web_tools import WebFetchTool, WebSearchTool
+    WEB_TOOLS_AVAILABLE = True
+except ImportError:
+    WEB_TOOLS_AVAILABLE = False
+    WebFetchTool = None
+    WebSearchTool = None
+
+# Session tools
+try:
+    from openclaw_session_tools import (
+        SessionsListTool, SessionsSendTool, SessionsHistoryTool, MessageTool,
+        AgentsListTool, SessionStatusTool, SessionsSpawnTool
+    )
+    SESSION_TOOLS_AVAILABLE = True
+except ImportError:
+    SESSION_TOOLS_AVAILABLE = False
+    SessionsListTool = None
+    SessionsSendTool = None
+    SessionsHistoryTool = None
+    MessageTool = None
+    AgentsListTool = None
+    SessionStatusTool = None
+    SessionsSpawnTool = None
+
 class BrowserTool:
     """Browser tool (ported from browser-tool.ts)"""
     
@@ -640,11 +678,13 @@ class BrowserTool:
             "snapshot": "browser.snapshot",
             "screenshot": "browser.screenshot",
             "act": "browser.act",
+            "close": "browser.close",
+            "focus": "browser.focus",
         }
         
         gateway_method = action_map.get(action)
         if not gateway_method:
-            raise ValueError(f"Unknown browser action: {action}")
+            raise ValueError(f"Unknown browser action: {action}. Available: {', '.join(action_map.keys())}")
         
         return await self.gateway_client.call(gateway_method, params)
 
@@ -675,7 +715,7 @@ class CanvasTool:
         
         gateway_command = action_map.get(action)
         if not gateway_command:
-            raise ValueError(f"Unknown canvas action: {action}")
+            raise ValueError(f"Unknown canvas action: {action}. Available: {', '.join(action_map.keys())}")
         
         invoke_params = {k: v for k, v in params.items() if k != "node"}
         
@@ -705,10 +745,12 @@ class NodesTool:
             "reject": "node.pair.reject",
             "notify": "system.notify",
             "camera_snap": "camera.snap",
+            "camera_list": "camera.list",
             "camera_clip": "camera.clip",
             "screen_record": "screen.record",
             "location_get": "location.get",
             "run": "system.run",
+            "invoke": None,  # Handled separately
         }
         
         if action in ["status", "pending"]:
@@ -721,7 +763,21 @@ class NodesTool:
         if action == "describe":
             return await self.gateway_client.call(action_map[action], {"nodeId": node_id})
         
-        # For invoke actions
+        # Handle invoke action separately
+        if action == "invoke":
+            invoke_command = params.get("invokeCommand")
+            if not invoke_command:
+                raise ValueError("invokeCommand parameter required for invoke action")
+            invoke_params_json = params.get("invokeParamsJson")
+            invoke_params = json.loads(invoke_params_json) if invoke_params_json else {}
+            return await self.gateway_client.call("node.invoke", {
+                "nodeId": node_id,
+                "command": invoke_command,
+                "params": invoke_params,
+                "idempotencyKey": str(uuid.uuid4())
+            })
+        
+        # For other actions that map to commands
         command = action_map.get(action)
         if not command:
             raise ValueError(f"Unknown nodes action: {action}")
@@ -759,7 +815,7 @@ class CronTool:
         
         gateway_method = action_map.get(action)
         if not gateway_method:
-            raise ValueError(f"Unknown cron action: {action}")
+            raise ValueError(f"Unknown cron action: {action}. Available: {', '.join(action_map.keys())}")
         
         return await self.gateway_client.call(gateway_method, params)
 
@@ -845,10 +901,23 @@ class MemoryTool:
 class ToolRegistry:
     """Registry for all tools"""
     
-    def __init__(self, gateway_client: Optional[GatewayClient] = None):
+    def __init__(self, gateway_client: Optional[GatewayClient] = None, config: Optional[Dict[str, Any]] = None):
         self.gateway_client = gateway_client
+        self.config = config or {}
         self.tools: Dict[str, Any] = {}
         self._register_default_tools()
+    
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """List all registered tools with their information"""
+        tools = []
+        for name, tool in self.tools.items():
+            tool_info = {"name": name}
+            if hasattr(tool, '__class__'):
+                tool_info["type"] = tool.__class__.__name__
+            if hasattr(tool, '__doc__') and tool.__doc__:
+                tool_info["description"] = tool.__doc__.strip().split('\n')[0]
+            tools.append(tool_info)
+        return tools
     
     def _register_default_tools(self):
         """Register default tools"""
@@ -858,8 +927,28 @@ class ToolRegistry:
             self.tools["nodes"] = NodesTool(self.gateway_client)
             self.tools["cron"] = CronTool(self.gateway_client)
         
-        self.tools["memory_search"] = MemoryTool()
-        self.tools["memory_get"] = MemoryTool()
+        # Memory tools (separate instances for different actions)
+        memory_tool = MemoryTool()
+        self.tools["memory_search"] = memory_tool
+        self.tools["memory_get"] = memory_tool
+        
+        # Web tools
+        if WEB_TOOLS_AVAILABLE:
+            self.tools["web_fetch"] = WebFetchTool(self.config)
+            self.tools["web_search"] = WebSearchTool(self.config)
+        
+        # Session tools
+        if SESSION_TOOLS_AVAILABLE and self.gateway_client:
+            self.tools["sessions_list"] = SessionsListTool(self.gateway_client)
+            self.tools["sessions_send"] = SessionsSendTool(self.gateway_client, agent_session_key=None)
+            self.tools["sessions_history"] = SessionsHistoryTool(self.gateway_client)
+            self.tools["sessions_spawn"] = SessionsSpawnTool(self.gateway_client)
+            self.tools["session_status"] = SessionStatusTool(self.gateway_client)
+            self.tools["message"] = MessageTool(self.gateway_client)
+        
+        # Agents tool (doesn't require gateway)
+        if SESSION_TOOLS_AVAILABLE:
+            self.tools["agents_list"] = AgentsListTool(self.gateway_client, self.config)
     
     async def execute(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute tool"""
@@ -867,8 +956,26 @@ class ToolRegistry:
         if not tool:
             raise ValueError(f"Tool '{tool_name}' not found")
         
+        # Handle different tool interfaces
         if hasattr(tool, 'execute'):
-            return await tool.execute(action, params)
+            # Tools with action parameter (browser, canvas, nodes, cron)
+            if tool_name in ["browser", "canvas", "nodes", "cron"]:
+                return await tool.execute(action, params)
+            # Tools without action parameter (web_fetch, web_search, memory, sessions, message, agents)
+            elif tool_name in ["web_fetch", "web_search", "sessions_list", "sessions_send", 
+                              "sessions_history", "sessions_spawn", "session_status", "message", "agents_list"]:
+                return await tool.execute(**params)
+            elif tool_name == "memory_search":
+                return await tool.search(**params)
+            elif tool_name == "memory_get":
+                return await tool.get(**params)
+            else:
+                # Try generic execute with action
+                try:
+                    return await tool.execute(action, params)
+                except TypeError:
+                    # If that fails, try without action
+                    return await tool.execute(**params)
         else:
             raise ValueError(f"Tool '{tool_name}' does not support execution")
 
@@ -883,4 +990,11 @@ __all__ = [
     "BrowserTool", "CanvasTool", "NodesTool", "CronTool", "MemoryTool",
     "ToolRegistry",
 ]
+
+# Export session tools if available
+if SESSION_TOOLS_AVAILABLE:
+    __all__.extend([
+        "SessionsListTool", "SessionsSendTool", "SessionsHistoryTool", "MessageTool",
+        "AgentsListTool", "SessionStatusTool", "SessionsSpawnTool"
+    ])
 

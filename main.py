@@ -278,7 +278,10 @@ def main():
             
             # Connect to gateway if URL provided
             if args.gateway_url:
-                asyncio.run(openclaw.connect_gateway(args.gateway_url))
+                try:
+                    asyncio.run(openclaw.connect_gateway(args.gateway_url, config=config))
+                except Exception as e:
+                    logger.warning(f"Failed to connect to gateway: {e}")
         except Exception as e:
             logger.warning(f"Failed to initialize OpenClaw integration: {e}")
 
