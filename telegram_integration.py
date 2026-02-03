@@ -60,10 +60,6 @@ class TelegramBot:
     
     def _load_pairings(self, force_reload: bool = False):
         """Load paired users and pending pairings from disk"""
-        if not force_reload and hasattr(self, '_pairings_loaded'):
-            # Only reload if forced or first time
-            return
-        
         old_paired_count = len(self.paired_users) if hasattr(self, 'paired_users') else 0
         
         if not hasattr(self, 'paired_users'):
@@ -77,18 +73,25 @@ class TelegramBot:
                     data = json.load(f)
                     if isinstance(data, dict):
                         if "paired_users" in data:
-                            new_paired = set(data["paired_users"])
-                            if new_paired != self.paired_users:
+                            # Ensure all user IDs are integers
+                            paired_list = data["paired_users"]
+                            new_paired = set(int(uid) for uid in paired_list if str(uid).isdigit())
+                            if new_paired != self.paired_users or force_reload:
                                 self.paired_users = new_paired
-                                logger.info(f"Loaded {len(self.paired_users)} paired users (was {old_paired_count})")
+                                if force_reload or len(new_paired) != old_paired_count:
+                                    logger.info(f"Loaded {len(self.paired_users)} paired users (was {old_paired_count})")
                         if "pending_pairings" in data:
                             self.pending_pairings = dict(data["pending_pairings"])
                             if len(self.pending_pairings) > 0:
                                 logger.debug(f"Loaded {len(self.pending_pairings)} pending pairings")
             except Exception as e:
-                logger.warning(f"Failed to load pairings: {e}")
+                logger.warning(f"Failed to load pairings: {e}", exc_info=True)
+        else:
+            if force_reload:
+                logger.debug(f"Pairing file does not exist: {self.pairing_store_path}")
         
-        self._pairings_loaded = True
+        if not hasattr(self, '_pairings_loaded'):
+            self._pairings_loaded = True
     
     def _save_pairings(self):
         """Save paired users to disk"""
@@ -101,14 +104,16 @@ class TelegramBot:
                         data = json.load(f)
                 except:
                     pass
-            data["paired_users"] = list(self.paired_users)
+            # Ensure paired_users are stored as list of integers
+            data["paired_users"] = [int(uid) for uid in self.paired_users]
             # Preserve pending_pairings if they exist
             if "pending_pairings" not in data:
                 data["pending_pairings"] = {}
             with open(self.pairing_store_path, 'w') as f:
                 json.dump(data, f, indent=2)
+            logger.debug(f"Saved {len(self.paired_users)} paired users to {self.pairing_store_path}")
         except Exception as e:
-            logger.error(f"Failed to save pairings: {e}")
+            logger.error(f"Failed to save pairings: {e}", exc_info=True)
     
     def approve_pairing(self, code: str) -> bool:
         """Approve a pairing code"""
@@ -142,7 +147,7 @@ class TelegramBot:
                 # Remove from pending (both memory and disk)
                 self.pending_pairings.pop(chat_id, None)
                 
-                # Update stored file
+                # Update stored file - ensure we preserve structure
                 try:
                     data = {}
                     if os.path.exists(self.pairing_store_path):
@@ -150,19 +155,26 @@ class TelegramBot:
                             data = json.load(f)
                     
                     # Update both paired_users and pending_pairings
-                    data["paired_users"] = list(self.paired_users)
+                    # Ensure paired_users are stored as list of integers (or strings that can be converted)
+                    data["paired_users"] = [int(uid) for uid in self.paired_users]
                     if "pending_pairings" in data:
                         data["pending_pairings"] = {k: v for k, v in data["pending_pairings"].items() if k != chat_id}
+                    else:
+                        data["pending_pairings"] = {}
                     
                     os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
                     with open(self.pairing_store_path, 'w') as f:
                         json.dump(data, f, indent=2)
+                    logger.info(f"Saved approval: user_id={user_id} to file")
                 except Exception as e:
-                    logger.warning(f"Failed to update pairing store: {e}")
-                    # Still save paired users
-                    self._save_pairings()
+                    logger.error(f"Failed to update pairing store: {e}", exc_info=True)
+                    # Still save paired users using the simpler method
+                    try:
+                        self._save_pairings()
+                    except:
+                        pass
                 
-                logger.info(f"Approved pairing for user {user_id} (code: {code})")
+                logger.info(f"Approved pairing for user {user_id} (code: {code}, chat_id: {chat_id})")
                 return True
             except ValueError as e:
                 logger.error(f"Invalid chat_id format: {chat_id}, error: {e}")
@@ -240,7 +252,7 @@ class TelegramBot:
         """Check if user is allowed to interact with the bot"""
         # Reload pairings from disk to get latest approvals
         # (in case approval happened while bot was running)
-        self._load_pairings()
+        self._load_pairings(force_reload=True)
         
         if self.config.dm_policy == "open":
             if self.config.allow_from:
@@ -254,11 +266,15 @@ class TelegramBot:
                 return False
             return True  # Open policy with no allowlist = allow all
         
-        # Pairing policy - check both in-memory and reload from disk
-        if user_id in self.paired_users:
+        # Pairing policy - check if user_id is in paired_users
+        # paired_users stores int user IDs
+        is_paired = user_id in self.paired_users
+        if is_paired:
+            logger.debug(f"User {user_id} is paired, allowing access")
             return True
-        
-        return False
+        else:
+            logger.debug(f"User {user_id} not in paired_users (current: {self.paired_users})")
+            return False
     
     async def _handle_start(self, update, context):
         """Handle /start command"""
