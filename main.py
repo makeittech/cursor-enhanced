@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import asyncio
 import re
+from typing import Optional
 
 # OpenClaw integration imports
 OPENCLAW_AVAILABLE = False
