@@ -68,6 +68,11 @@ class TelegramBot:
         if not hasattr(self, 'pending_pairings'):
             self.pending_pairings: Dict[str, str] = {}
         
+        # Ensure paired_users is actually a set (not a list or something else)
+        if not isinstance(self.paired_users, set):
+            logger.warning(f"paired_users is not a set! It's a {type(self.paired_users)}. Converting...")
+            self.paired_users = set(self.paired_users)
+        
         if os.path.exists(self.pairing_store_path):
             try:
                 with open(self.pairing_store_path, 'r') as f:
@@ -86,8 +91,13 @@ class TelegramBot:
                             
                             if new_paired != old_paired_set or force_reload:
                                 self.paired_users = new_paired
+                                # Ensure it's a set
+                                if not isinstance(self.paired_users, set):
+                                    logger.warning(f"After assignment, paired_users is {type(self.paired_users)}, converting to set")
+                                    self.paired_users = set(self.paired_users)
                                 if force_reload or len(new_paired) != old_paired_count:
                                     logger.info(f"Loaded {len(self.paired_users)} paired users from disk (was {old_paired_count}, file had: {paired_list}, converted to: {list(new_paired)})")
+                                    logger.info(f"   Set contents: {self.paired_users}, type: {type(self.paired_users)}")
                                     if force_reload:
                                         logger.debug(f"Force reload: old_set={old_paired_set}, new_set={new_paired}, match={new_paired == old_paired_set}")
                         if "pending_pairings" in data:
