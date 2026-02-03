@@ -21,6 +21,22 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import logging
 
+# Import OpenClaw core features
+try:
+    from openclaw_core import (
+        SessionStore, SessionEntry,
+        SkillsManager, SkillSnapshot,
+        GatewayClient,
+        ToolRegistry, BrowserTool, CanvasTool, NodesTool, CronTool, MemoryTool,
+        ThinkLevel, VerboseLevel, normalize_think_level, normalize_verbose_level,
+        format_token_count, format_usd, estimate_usage_cost, ModelCostConfig, UsageTotals
+    )
+    OPENCLAW_CORE_AVAILABLE = True
+except ImportError as e:
+    OPENCLAW_CORE_AVAILABLE = False
+    logger = logging.getLogger("cursor_enhanced.openclaw")
+    logger.warning(f"OpenClaw core not available: {e}")
+
 # Optional websockets import
 try:
     import websockets
@@ -110,63 +126,69 @@ class SessionEntry:
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
-class SessionStore:
-    """Manages session storage (inspired by OpenClaw's session store)"""
-    
-    def __init__(self, store_path: Optional[str] = None):
-        if store_path is None:
-            store_path = os.path.expanduser("~/.cursor-enhanced/sessions.json")
-        self.store_path = store_path
-        self.sessions: Dict[str, SessionEntry] = {}
-        self._ensure_store_dir()
-        self.load()
-    
-    def _ensure_store_dir(self):
-        """Ensure the store directory exists"""
-        os.makedirs(os.path.dirname(self.store_path), exist_ok=True)
-    
-    def load(self):
-        """Load sessions from disk"""
-        if os.path.exists(self.store_path):
-            try:
-                with open(self.store_path, 'r') as f:
-                    data = json.load(f)
-                    self.sessions = {
-                        k: SessionEntry(**v) for k, v in data.items()
-                    }
-                logger.info(f"Loaded {len(self.sessions)} sessions")
-            except Exception as e:
-                logger.error(f"Failed to load sessions: {e}")
+# Use OpenClaw core SessionStore if available, otherwise fallback
+if OPENCLAW_CORE_AVAILABLE:
+    # Use the core SessionStore directly
+    pass
+else:
+    # Fallback implementation
+    class SessionStore:
+        """Manages session storage (inspired by OpenClaw's session store)"""
+        
+        def __init__(self, store_path: Optional[str] = None):
+            if store_path is None:
+                store_path = os.path.expanduser("~/.cursor-enhanced/sessions.json")
+            self.store_path = store_path
+            self.sessions: Dict[str, SessionEntry] = {}
+            self._ensure_store_dir()
+            self.load()
+        
+        def _ensure_store_dir(self):
+            """Ensure the store directory exists"""
+            os.makedirs(os.path.dirname(self.store_path), exist_ok=True)
+        
+        def load(self):
+            """Load sessions from disk"""
+            if os.path.exists(self.store_path):
+                try:
+                    with open(self.store_path, 'r') as f:
+                        data = json.load(f)
+                        self.sessions = {
+                            k: SessionEntry(**v) for k, v in data.items()
+                        }
+                    logger.info(f"Loaded {len(self.sessions)} sessions")
+                except Exception as e:
+                    logger.error(f"Failed to load sessions: {e}")
+                    self.sessions = {}
+            else:
                 self.sessions = {}
-        else:
-            self.sessions = {}
-    
-    def save(self):
-        """Save sessions to disk"""
-        try:
-            data = {
-                k: v.to_dict() for k, v in self.sessions.items()
-            }
-            with open(self.store_path, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.debug(f"Saved {len(self.sessions)} sessions")
-        except Exception as e:
-            logger.error(f"Failed to save sessions: {e}")
-    
-    def get(self, session_key: str) -> Optional[SessionEntry]:
-        """Get a session by key"""
-        return self.sessions.get(session_key)
-    
-    def set(self, session_key: str, entry: SessionEntry):
-        """Set a session entry"""
-        self.sessions[session_key] = entry
-        self.save()
-    
-    def delete(self, session_key: str):
-        """Delete a session"""
-        if session_key in self.sessions:
-            del self.sessions[session_key]
+        
+        def save(self):
+            """Save sessions to disk"""
+            try:
+                data = {
+                    k: v.to_dict() for k, v in self.sessions.items()
+                }
+                with open(self.store_path, 'w') as f:
+                    json.dump(data, f, indent=2)
+                logger.debug(f"Saved {len(self.sessions)} sessions")
+            except Exception as e:
+                logger.error(f"Failed to save sessions: {e}")
+        
+        def get(self, session_key: str) -> Optional[SessionEntry]:
+            """Get a session by key"""
+            return self.sessions.get(session_key)
+        
+        def set(self, session_key: str, entry: SessionEntry):
+            """Set a session entry"""
+            self.sessions[session_key] = entry
             self.save()
+        
+        def delete(self, session_key: str):
+            """Delete a session"""
+            if session_key in self.sessions:
+                del self.sessions[session_key]
+                self.save()
 
 # Gateway Client (OpenClaw-style WebSocket communication)
 class GatewayClient:
@@ -227,56 +249,62 @@ class GatewayClient:
             return {"error": str(e)}
 
 # Skills Platform (OpenClaw-style)
-class SkillsManager:
-    """Manages skills (inspired by OpenClaw's skills platform)"""
-    
-    def __init__(self, workspace_dir: Optional[str] = None):
-        if workspace_dir is None:
-            workspace_dir = os.path.expanduser("~/.cursor-enhanced/workspace")
-        self.workspace_dir = workspace_dir
-        self.skills_dir = os.path.join(workspace_dir, "skills")
-        self._ensure_dirs()
-    
-    def _ensure_dirs(self):
-        """Ensure workspace directories exist"""
-        os.makedirs(self.workspace_dir, exist_ok=True)
-        os.makedirs(self.skills_dir, exist_ok=True)
-    
-    def list_skills(self) -> List[str]:
-        """List available skills"""
-        if not os.path.exists(self.skills_dir):
-            return []
+# Use OpenClaw core SkillsManager if available, otherwise fallback
+if OPENCLAW_CORE_AVAILABLE:
+    # Use the core SkillsManager directly
+    pass
+else:
+    # Fallback implementation
+    class SkillsManager:
+        """Manages skills (inspired by OpenClaw's skills platform)"""
         
-        skills = []
-        for item in os.listdir(self.skills_dir):
-            skill_path = os.path.join(self.skills_dir, item)
-            if os.path.isdir(skill_path):
-                skill_md = os.path.join(skill_path, "SKILL.md")
-                if os.path.exists(skill_md):
-                    skills.append(item)
+        def __init__(self, workspace_dir: Optional[str] = None):
+            if workspace_dir is None:
+                workspace_dir = os.path.expanduser("~/.cursor-enhanced/workspace")
+            self.workspace_dir = workspace_dir
+            self.skills_dir = os.path.join(workspace_dir, "skills")
+            self._ensure_dirs()
         
-        return skills
-    
-    def get_skill_info(self, skill_name: str) -> Optional[Dict[str, Any]]:
-        """Get information about a skill"""
-        skill_path = os.path.join(self.skills_dir, skill_name)
-        skill_md = os.path.join(skill_path, "SKILL.md")
+        def _ensure_dirs(self):
+            """Ensure workspace directories exist"""
+            os.makedirs(self.workspace_dir, exist_ok=True)
+            os.makedirs(self.skills_dir, exist_ok=True)
         
-        if not os.path.exists(skill_md):
-            return None
+        def list_skills(self) -> List[str]:
+            """List available skills"""
+            if not os.path.exists(self.skills_dir):
+                return []
+            
+            skills = []
+            for item in os.listdir(self.skills_dir):
+                skill_path = os.path.join(self.skills_dir, item)
+                if os.path.isdir(skill_path):
+                    skill_md = os.path.join(skill_path, "SKILL.md")
+                    if os.path.exists(skill_md):
+                        skills.append(item)
+            
+            return skills
         
-        try:
-            with open(skill_md, 'r') as f:
-                content = f.read()
-                # Parse basic info from SKILL.md
-                return {
-                    "name": skill_name,
-                    "path": skill_path,
-                    "description": content[:200] if content else ""
-                }
-        except Exception as e:
-            logger.error(f"Failed to read skill info: {e}")
-            return None
+        def get_skill_info(self, skill_name: str) -> Optional[Dict[str, Any]]:
+            """Get information about a skill"""
+            skill_path = os.path.join(self.skills_dir, skill_name)
+            skill_md = os.path.join(skill_path, "SKILL.md")
+            
+            if not os.path.exists(skill_md):
+                return None
+            
+            try:
+                with open(skill_md, 'r') as f:
+                    content = f.read()
+                    # Parse basic info from SKILL.md
+                    return {
+                        "name": skill_name,
+                        "path": skill_path,
+                        "description": content[:200] if content else ""
+                    }
+            except Exception as e:
+                logger.error(f"Failed to read skill info: {e}")
+                return None
 
 # Presence and Usage Tracking (OpenClaw-style)
 @dataclass
@@ -313,12 +341,23 @@ class OpenClawIntegration:
     """Main integration class that brings OpenClaw features to cursor-enhanced"""
     
     def __init__(self):
-        self.tool_registry = ToolRegistry()
-        self.session_store = SessionStore()
-        self.skills_manager = SkillsManager()
+        if OPENCLAW_CORE_AVAILABLE:
+            # Use core implementations
+            self.session_store = SessionStore()
+            self.skills_manager = SkillsManager()
+            self.gateway_client: Optional[GatewayClient] = None
+            self.tool_registry: Optional[ToolRegistry] = None
+        else:
+            # Fallback to basic implementations
+            self.tool_registry = ToolRegistry()
+            self.session_store = SessionStore()
+            self.skills_manager = SkillsManager()
+            self.gateway_client: Optional[GatewayClient] = None
+        
         self.presence_manager = PresenceManager()
-        self.gateway_client: Optional[GatewayClient] = None
-        self._register_default_tools()
+        
+        if not OPENCLAW_CORE_AVAILABLE:
+            self._register_default_tools()
     
     def _register_default_tools(self):
         """Register default tools (browser, canvas, nodes, etc.)"""
@@ -387,8 +426,14 @@ class OpenClawIntegration:
     
     async def connect_gateway(self, gateway_url: str = "ws://127.0.0.1:18789", token: Optional[str] = None):
         """Connect to a gateway WebSocket server"""
-        self.gateway_client = GatewayClient(gateway_url, token)
-        await self.gateway_client.connect()
+        if OPENCLAW_CORE_AVAILABLE:
+            self.gateway_client = GatewayClient(gateway_url, token=token)
+            await self.gateway_client.connect()
+            # Initialize tool registry with gateway client
+            self.tool_registry = ToolRegistry(self.gateway_client)
+        else:
+            self.gateway_client = GatewayClient(gateway_url, token)
+            await self.gateway_client.connect()
     
     def get_session(self, session_key: str) -> Optional[SessionEntry]:
         """Get a session by key"""
@@ -408,13 +453,24 @@ class OpenClawIntegration:
         self.session_store.set(session_key, entry)
         return entry
     
-    async def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool"""
-        return await self.tool_registry.execute_tool(tool_name, params)
+        if OPENCLAW_CORE_AVAILABLE and self.tool_registry:
+            return await self.tool_registry.execute(tool_name, action, params)
+        elif not OPENCLAW_CORE_AVAILABLE:
+            return await self.tool_registry.execute_tool(tool_name, params)
+        else:
+            raise RuntimeError("Tool registry not initialized")
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """List all available tools"""
-        return self.tool_registry.list_tools()
+        if OPENCLAW_CORE_AVAILABLE and self.tool_registry:
+            # Return tool names from registry
+            return [{"name": name} for name in self.tool_registry.tools.keys()]
+        elif not OPENCLAW_CORE_AVAILABLE:
+            return self.tool_registry.list_tools()
+        else:
+            return []
     
     def list_skills(self) -> List[str]:
         """List available skills"""
