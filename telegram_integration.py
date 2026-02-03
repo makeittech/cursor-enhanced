@@ -312,21 +312,26 @@ class TelegramBot:
         
         # Pairing policy - check if user_id is in paired_users
         # Check if user_id is in paired_users (all should be ints now)
-        logger.debug(f"About to check: user_id_int={user_id_int} (type={type(user_id_int)}), self.paired_users={self.paired_users} (type={type(self.paired_users)}), len={len(self.paired_users) if hasattr(self.paired_users, '__len__') else 'N/A'}")
+        logger.info(f"About to check membership: user_id_int={user_id_int} (type={type(user_id_int)}), self.paired_users={self.paired_users} (type={type(self.paired_users)}), len={len(self.paired_users) if hasattr(self.paired_users, '__len__') else 'N/A'}")
         
         # Explicit check with detailed logging
         is_paired = False
-        if user_id_int in self.paired_users:
+        membership_result = user_id_int in self.paired_users
+        logger.info(f"Membership check result: {user_id_int} in {self.paired_users} = {membership_result}")
+        
+        if membership_result:
             is_paired = True
             logger.info(f"✅ User {user_id_int} is paired (found in set), allowing access")
         else:
             # Try explicit iteration to see what's in the set
-            logger.error(f"❌ User {user_id_int} (type={type(user_id_int)}) NOT found in paired_users set")
-            logger.error(f"   paired_users set contents: {list(self.paired_users)}")
-            logger.error(f"   paired_users set type: {type(self.paired_users)}")
+            logger.info(f"❌ User {user_id_int} (type={type(user_id_int)}) NOT found in paired_users set")
+            logger.info(f"   paired_users set contents: {list(self.paired_users)}")
+            logger.info(f"   paired_users set type: {type(self.paired_users)}")
             for uid in self.paired_users:
-                logger.error(f"   Comparing: {user_id_int} == {uid} (type {type(uid)})? {user_id_int == uid}")
-                logger.error(f"   Comparing: {user_id_int} is {uid}? {user_id_int is uid}")
+                eq_result = user_id_int == uid
+                is_result = user_id_int is uid
+                logger.info(f"   Comparing: {user_id_int} == {uid} (type {type(uid)})? {eq_result}")
+                logger.info(f"   Comparing: {user_id_int} is {uid}? {is_result}")
         
         if is_paired:
             return True
