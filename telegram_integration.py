@@ -224,7 +224,7 @@ class TelegramBot:
                 await update.message.reply_text(
                     f"Hello! To start using this bot, please approve the pairing code: **{code}**\n\n"
                     f"Run this command on your system:\n"
-                    f"`cursor-enhanced telegram approve {code}`\n\n"
+                    f"`cursor-enhanced --telegram-approve {code}`\n\n"
                     "Or if you're already paired, you may need to check your configuration.",
                     parse_mode="Markdown"
                 )
@@ -282,7 +282,7 @@ You can also just send me messages and I'll respond using my available tools."""
                 code = self.pending_pairings[chat_id_str]
                 await message.reply_text(
                     f"Please approve the pairing code first: **{code}**\n\n"
-                    f"Run: `cursor-enhanced telegram approve {code}`",
+                    f"Run: `cursor-enhanced --telegram-approve {code}`",
                     parse_mode="Markdown"
                 )
             else:
