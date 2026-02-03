@@ -7,6 +7,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import asyncio
+import re
 
 # OpenClaw integration imports
 OPENCLAW_AVAILABLE = False
@@ -142,6 +143,65 @@ def get_history_fitting_token_limit(history, max_tokens, system_prompt_tokens, u
     selected_messages.extend(reversed(temp_messages))
     
     return selected_messages, current_tokens
+
+async def execute_tools_from_response(response: str, openclaw, logger) -> Optional[str]:
+    """Parse agent response for tool usage and execute tools"""
+    if not openclaw:
+        return None
+    
+    results = []
+    response_lower = response.lower()
+    
+    # Check for web search mentions
+    web_search_patterns = [
+        r"search(?:ing|ed)?\s+(?:the\s+)?web\s+for\s+['\"]?([^'\"]+)['\"]?",
+        r"search(?:ing|ed)?\s+for\s+['\"]?([^'\"]+)['\"]?",
+        r"looking\s+up\s+['\"]?([^'\"]+)['\"]?",
+    ]
+    
+    for pattern in web_search_patterns:
+        matches = re.finditer(pattern, response_lower, re.IGNORECASE)
+        for match in matches:
+            query = match.group(1).strip()
+            if query and len(query) > 3:  # Reasonable query length
+                try:
+                    logger.info(f"Executing web_search tool with query: {query}")
+                    result = await openclaw.tool_registry.execute("web_search", query=query)
+                    if result and not result.get("error"):
+                        results.append(f"Web search for '{query}': {json.dumps(result, indent=2)}")
+                    else:
+                        results.append(f"Web search for '{query}' failed: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"Error executing web_search: {e}")
+                    results.append(f"Web search error: {str(e)}")
+    
+    # Check for web fetch mentions
+    web_fetch_patterns = [
+        r"fetch(?:ing|ed)?\s+(?:the\s+)?(?:url|page|website)?\s*(?:at\s+)?(https?://[^\s\)]+)",
+        r"fetch(?:ing|ed)?\s+(?:from\s+)?(https?://[^\s\)]+)",
+        r"get(?:ting)?\s+(?:the\s+)?(?:content\s+)?(?:from\s+)?(https?://[^\s\)]+)",
+    ]
+    
+    for pattern in web_fetch_patterns:
+        matches = re.finditer(pattern, response_lower, re.IGNORECASE)
+        for match in matches:
+            url = match.group(1).strip()
+            if url:
+                try:
+                    logger.info(f"Executing web_fetch tool with URL: {url}")
+                    result = await openclaw.tool_registry.execute("web_fetch", url=url)
+                    if result and not result.get("error"):
+                        content = result.get("content", "")[:1000]  # Limit content length
+                        results.append(f"Fetched {url}: {content}...")
+                    else:
+                        results.append(f"Failed to fetch {url}: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"Error executing web_fetch: {e}")
+                    results.append(f"Web fetch error: {str(e)}")
+    
+    if results:
+        return "\n".join(results)
+    return None
 
 def format_history_for_prompt(history):
     if not history:
@@ -679,8 +739,9 @@ def main():
     cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
     cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
     
-    # Run and capture output
-    process = subprocess.Popen(
+    # Run and capture output (use asyncio if we need async tool execution)
+    async def run_with_tools():
+        process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
