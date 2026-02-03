@@ -53,25 +53,42 @@ class TelegramBot:
         self.application = None
         self.bot = None
         self.pairing_store_path = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
-        self._load_pairings()
-        self.pending_pairings: Dict[str, str] = {}  # chat_id -> pairing_code
-    
-    def _load_pairings(self):
-        """Load paired users and pending pairings from disk"""
         self.paired_users: set = set()
+        self.pending_pairings: Dict[str, str] = {}  # chat_id -> pairing_code
+        self._pairings_loaded = False
+        self._load_pairings(force_reload=True)
+    
+    def _load_pairings(self, force_reload: bool = False):
+        """Load paired users and pending pairings from disk"""
+        if not force_reload and hasattr(self, '_pairings_loaded'):
+            # Only reload if forced or first time
+            return
+        
+        old_paired_count = len(self.paired_users) if hasattr(self, 'paired_users') else 0
+        
+        if not hasattr(self, 'paired_users'):
+            self.paired_users: set = set()
+        if not hasattr(self, 'pending_pairings'):
+            self.pending_pairings: Dict[str, str] = {}
+        
         if os.path.exists(self.pairing_store_path):
             try:
                 with open(self.pairing_store_path, 'r') as f:
                     data = json.load(f)
                     if isinstance(data, dict):
                         if "paired_users" in data:
-                            self.paired_users = set(data["paired_users"])
-                            logger.info(f"Loaded {len(self.paired_users)} paired users")
+                            new_paired = set(data["paired_users"])
+                            if new_paired != self.paired_users:
+                                self.paired_users = new_paired
+                                logger.info(f"Loaded {len(self.paired_users)} paired users (was {old_paired_count})")
                         if "pending_pairings" in data:
                             self.pending_pairings = dict(data["pending_pairings"])
-                            logger.info(f"Loaded {len(self.pending_pairings)} pending pairings")
+                            if len(self.pending_pairings) > 0:
+                                logger.debug(f"Loaded {len(self.pending_pairings)} pending pairings")
             except Exception as e:
                 logger.warning(f"Failed to load pairings: {e}")
+        
+        self._pairings_loaded = True
     
     def _save_pairings(self):
         """Save paired users to disk"""
@@ -221,6 +238,10 @@ class TelegramBot:
     
     def _is_allowed_user(self, user_id: int, username: Optional[str] = None) -> bool:
         """Check if user is allowed to interact with the bot"""
+        # Reload pairings from disk to get latest approvals
+        # (in case approval happened while bot was running)
+        self._load_pairings()
+        
         if self.config.dm_policy == "open":
             if self.config.allow_from:
                 if "*" in self.config.allow_from:
@@ -233,7 +254,7 @@ class TelegramBot:
                 return False
             return True  # Open policy with no allowlist = allow all
         
-        # Pairing policy
+        # Pairing policy - check both in-memory and reload from disk
         if user_id in self.paired_users:
             return True
         
