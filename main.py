@@ -751,9 +751,8 @@ def main():
     cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
     cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
     
-    # Run and capture output (use asyncio if we need async tool execution)
-    async def run_with_tools():
-        process = subprocess.Popen(
+    # Run and capture output
+    process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
