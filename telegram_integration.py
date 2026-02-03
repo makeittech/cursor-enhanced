@@ -297,8 +297,26 @@ class TelegramBot:
         user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
         
         logger.info(f"Checking access for user_id={user_id_int} (type={type(user_id_int)}), paired_users={sorted(self.paired_users)} (count={len(self.paired_users)}, types: {[type(u) for u in self.paired_users]})")
+        logger.info(f"DM policy: {self.config.dm_policy}, allow_from: {self.config.allow_from}")
         
         if self.config.dm_policy == "open":
+            logger.info(f"Using OPEN policy - checking allowlist")
+            if self.config.allow_from:
+                if "*" in self.config.allow_from:
+                    logger.info(f"Open policy with * - allowing all")
+                    return True
+                user_str = str(user_id)
+                username_lower = username.lower() if username else None
+                for allowed in self.config.allow_from:
+                    if user_str == allowed or (username_lower and username_lower == allowed.lower()):
+                        logger.info(f"User {user_id_int} found in allowlist: {allowed}")
+                        return True
+                logger.info(f"User {user_id_int} NOT in allowlist, denying access")
+                return False
+            logger.info(f"Open policy with no allowlist - allowing all")
+            return True  # Open policy with no allowlist = allow all
+        
+        logger.info(f"Using PAIRING policy - checking paired_users")
             if self.config.allow_from:
                 if "*" in self.config.allow_from:
                     return True
