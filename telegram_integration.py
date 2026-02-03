@@ -173,7 +173,17 @@ class TelegramBot:
                     os.makedirs(os.path.dirname(self.pairing_store_path), exist_ok=True)
                     with open(self.pairing_store_path, 'w') as f:
                         json.dump(data, f, indent=2)
-                    logger.info(f"Saved approval: user_id={user_id} (chat_id={chat_id}) to file. File now has: {data.get('paired_users', [])}")
+                        f.flush()
+                        os.fsync(f.fileno())  # Force write to disk
+                    
+                    # Verify the file was written correctly
+                    try:
+                        with open(self.pairing_store_path, 'r') as f:
+                            verify_data = json.load(f)
+                            verify_paired = verify_data.get("paired_users", [])
+                            logger.info(f"Saved approval: user_id={user_id} (chat_id={chat_id}). File verification: {verify_paired} (types: {[type(u) for u in verify_paired]})")
+                    except Exception as e:
+                        logger.error(f"Failed to verify saved file: {e}")
                 except Exception as e:
                     logger.error(f"Failed to update pairing store: {e}", exc_info=True)
                     # Still save paired users using the simpler method
