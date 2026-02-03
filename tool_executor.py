@@ -79,7 +79,9 @@ async def execute_tool_from_response(
     for url in urls[:3]:  # Limit to 3 URLs
         try:
             logger.info(f"Executing web_fetch for URL: {url}")
-            result = await openclaw_integration.tool_registry.execute("web_fetch", url=url)
+            # ToolRegistry.execute expects (tool_name, action, params)
+            # For web_fetch, action is empty string, params is a dict
+            result = await openclaw_integration.tool_registry.execute("web_fetch", "", {"url": url})
             tool_results.append({"tool": "web_fetch", "url": url, "result": result})
             
             # Append result to response
@@ -96,7 +98,9 @@ async def execute_tool_from_response(
     for query in search_queries[:2]:  # Limit to 2 queries
         try:
             logger.info(f"Executing web_search for query: {query}")
-            result = await openclaw_integration.tool_registry.execute("web_search", query=query)
+            # ToolRegistry.execute expects (tool_name, action, params)
+            # For web_search, action is empty string, params is a dict
+            result = await openclaw_integration.tool_registry.execute("web_search", "", {"query": query})
             tool_results.append({"tool": "web_search", "query": query, "result": result})
             
             # Append result to response
