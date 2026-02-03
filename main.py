@@ -495,7 +495,12 @@ def main():
         if openclaw_tools:
             tools_info.append("\n=== Available OpenClaw Tools ===")
             for tool in openclaw_tools:
-                tools_info.append(f"- {tool.get('name')}: {tool.get('description', '')}")
+                name = tool.get('name', 'unknown')
+                desc = tool.get('description', '')
+                if desc:
+                    tools_info.append(f"- {name}: {desc}")
+                else:
+                    tools_info.append(f"- {name}")
         
         skills = openclaw.list_skills()
         if skills:

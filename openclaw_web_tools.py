@@ -20,7 +20,11 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 class WebFetchTool:
-    """Web fetch tool (ported from web-fetch.ts)"""
+    """Web fetch tool (ported from web-fetch.ts)
+    
+    Fetch and extract content from web URLs. Supports markdown and text extraction modes.
+    Use this to get content from websites, documentation, or any HTTP/HTTPS URL.
+    """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
@@ -106,7 +110,10 @@ class WebFetchTool:
         return html.strip()
 
 class WebSearchTool:
-    """Web search tool (ported from web-search.ts)"""
+    """Web search tool (ported from web-search.ts)
+    
+    Search the web for information. Requires API integration (DuckDuckGo, Google, etc.).
+    """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}

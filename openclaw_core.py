@@ -825,7 +825,11 @@ class CronTool:
         return await self.gateway_client.call(gateway_method, params)
 
 class MemoryTool:
-    """Memory tool (ported from memory-tool.ts)"""
+    """Memory tool (ported from memory-tool.ts)
+    
+    Search and retrieve content from MEMORY.md and memory/*.md files.
+    Use memory_search to find relevant content, then memory_get to retrieve specific sections.
+    """
     
     def __init__(self, workspace_dir: Optional[str] = None):
         self.workspace_dir = workspace_dir or os.path.expanduser("~/.cursor-enhanced/workspace")
@@ -933,11 +937,12 @@ class ToolRegistry:
             self.tools["cron"] = CronTool(self.gateway_client)
         
         # Memory tools (separate instances for different actions)
+        # These work without gateway
         memory_tool = MemoryTool()
         self.tools["memory_search"] = memory_tool
         self.tools["memory_get"] = memory_tool
         
-        # Web tools
+        # Web tools (work without gateway)
         if WEB_TOOLS_AVAILABLE:
             self.tools["web_fetch"] = WebFetchTool(self.config)
             self.tools["web_search"] = WebSearchTool(self.config)

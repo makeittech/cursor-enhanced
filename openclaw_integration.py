@@ -349,10 +349,12 @@ class OpenClawIntegration:
     def __init__(self):
         if OPENCLAW_CORE_AVAILABLE:
             # Use core implementations
+            from openclaw_core import ToolRegistry
             self.session_store = SessionStore()
             self.skills_manager = SkillsManager()
             self.gateway_client: Optional[GatewayClient] = None
-            self.tool_registry: Optional[ToolRegistry] = None
+            # Initialize tool registry even without gateway (for memory tools, etc.)
+            self.tool_registry = ToolRegistry(gateway_client=None, config={})
         else:
             # Fallback to basic implementations
             self.tool_registry = ToolRegistry()
@@ -436,7 +438,8 @@ class OpenClawIntegration:
             from openclaw_core import GatewayClient, ToolRegistry
             self.gateway_client = GatewayClient(gateway_url, token=token)
             await self.gateway_client.connect()
-            # Initialize tool registry with gateway client and config
+            # Re-initialize tool registry with gateway client and config
+            # This will add gateway-dependent tools (browser, canvas, nodes, cron, sessions)
             self.tool_registry = ToolRegistry(self.gateway_client, config=config or {})
         else:
             self.gateway_client = GatewayClient(gateway_url, token)
