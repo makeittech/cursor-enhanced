@@ -57,15 +57,19 @@ class TelegramBot:
         self.pending_pairings: Dict[str, str] = {}  # chat_id -> pairing_code
     
     def _load_pairings(self):
-        """Load paired users from disk"""
+        """Load paired users and pending pairings from disk"""
         self.paired_users: set = set()
         if os.path.exists(self.pairing_store_path):
             try:
                 with open(self.pairing_store_path, 'r') as f:
                     data = json.load(f)
-                    if isinstance(data, dict) and "paired_users" in data:
-                        self.paired_users = set(data["paired_users"])
-                        logger.info(f"Loaded {len(self.paired_users)} paired users")
+                    if isinstance(data, dict):
+                        if "paired_users" in data:
+                            self.paired_users = set(data["paired_users"])
+                            logger.info(f"Loaded {len(self.paired_users)} paired users")
+                        if "pending_pairings" in data:
+                            self.pending_pairings = dict(data["pending_pairings"])
+                            logger.info(f"Loaded {len(self.pending_pairings)} pending pairings")
             except Exception as e:
                 logger.warning(f"Failed to load pairings: {e}")
     

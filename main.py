@@ -276,7 +276,7 @@ def main():
             config = load_telegram_config()
             if not config:
                 print("Error: Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
-                return
+                sys.exit(1)
             
             # Create a temporary bot instance to approve pairing
             # We don't need to start it, just use the approve method
@@ -284,14 +284,21 @@ def main():
             if bot.approve_pairing(args.telegram_approve):
                 print(f"✅ Pairing code {args.telegram_approve} approved successfully!")
                 print("You can now send messages to the bot.")
+                sys.exit(0)
             else:
                 print(f"❌ Pairing code {args.telegram_approve} not found or already used.")
                 print("Make sure you're using the exact code shown by the bot.")
-        except ImportError:
-            print("Telegram integration not available. Install with: pip install python-telegram-bot")
+                print(f"   Check ~/.cursor-enhanced/telegram-pairings.json for pending codes.")
+                sys.exit(1)
+        except ImportError as e:
+            print(f"Telegram integration not available: {e}")
+            print("Install with: pip install python-telegram-bot")
+            sys.exit(1)
         except Exception as e:
             print(f"Error approving pairing: {e}")
-        return
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
     
     if args.telegram:
         # Start Telegram bot
