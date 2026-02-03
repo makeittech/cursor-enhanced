@@ -265,6 +265,8 @@ def main():
     parser.add_argument("--telegram", action="store_true", help="Start Telegram bot")
     parser.add_argument("--telegram-approve", type=str, metavar="CODE", help="Approve Telegram pairing code")
     parser.add_argument("--telegram-list-pending", action="store_true", help="List pending Telegram pairing codes")
+    parser.add_argument("--telegram-list-paired", action="store_true", help="List paired Telegram users")
+    parser.add_argument("--telegram-debug", action="store_true", help="Show debug info about Telegram pairings")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
@@ -288,6 +290,45 @@ def main():
                 print(f"Error reading pairing file: {e}")
         else:
             print("No pairing file found. Send /start to your bot to generate a pairing code.")
+        return
+    
+    if args.telegram_list_paired:
+        # List paired users
+        pairing_file = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+        if os.path.exists(pairing_file):
+            try:
+                with open(pairing_file, 'r') as f:
+                    data = json.load(f)
+                    paired = data.get("paired_users", [])
+                    if paired:
+                        print("Paired users:")
+                        for user_id in paired:
+                            print(f"  User ID: {user_id} (type: {type(user_id).__name__})")
+                    else:
+                        print("No paired users found.")
+            except Exception as e:
+                print(f"Error reading pairing file: {e}")
+        else:
+            print("No pairing file found.")
+        return
+    
+    if args.telegram_debug:
+        # Show full debug info
+        pairing_file = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+        if os.path.exists(pairing_file):
+            try:
+                with open(pairing_file, 'r') as f:
+                    data = json.load(f)
+                    print("=== Telegram Pairing Debug Info ===")
+                    print(f"File path: {pairing_file}")
+                    print(f"Raw JSON data:")
+                    print(json.dumps(data, indent=2))
+                    print(f"\nPaired users: {data.get('paired_users', [])}")
+                    print(f"Pending pairings: {data.get('pending_pairings', {})}")
+            except Exception as e:
+                print(f"Error reading pairing file: {e}")
+        else:
+            print(f"No pairing file found at: {pairing_file}")
         return
     
     if args.telegram_approve:

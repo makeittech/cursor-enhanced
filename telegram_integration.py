@@ -151,8 +151,16 @@ class TelegramBot:
         
         if chat_id:
             try:
+                # Convert chat_id to int - this is the user_id for private chats
                 user_id = int(chat_id)
+                # Also store chat_id as int in case they differ (shouldn't in private chats)
+                chat_id_int = int(chat_id)
+                
+                # Add both user_id and chat_id_int to paired_users (they should be the same)
                 self.paired_users.add(user_id)
+                if chat_id_int != user_id:
+                    self.paired_users.add(chat_id_int)
+                    logger.warning(f"chat_id ({chat_id_int}) != user_id ({user_id}), added both to paired_users")
                 
                 # Remove from pending (both memory and disk)
                 self.pending_pairings.pop(chat_id, None)
@@ -293,14 +301,17 @@ class TelegramBot:
         # Ensure user_id is int for comparison
         user_id_int = int(user_id) if not isinstance(user_id, int) else user_id
         
-        # Check both as int and as string (in case of type mismatch)
-        is_paired = (user_id_int in self.paired_users) or (str(user_id_int) in [str(uid) for uid in self.paired_users])
+        # Check if user_id is in paired_users (all should be ints now)
+        is_paired = user_id_int in self.paired_users
         
         if is_paired:
             logger.info(f"User {user_id_int} is paired, allowing access")
             return True
         else:
-            logger.warning(f"User {user_id_int} (type={type(user_id_int)}) not in paired_users. Current paired_users: {self.paired_users} (types: {[type(u) for u in self.paired_users]})")
+            logger.warning(f"User {user_id_int} (type={type(user_id_int)}) not in paired_users. Current paired_users: {sorted(self.paired_users)} (types: {[type(u) for u in self.paired_users]})")
+            # Also check if maybe chat.id was used instead of user.id
+            # In private chats, chat.id == user.id, but let's be thorough
+            logger.warning(f"Checking if there's a mismatch - user_id={user_id_int}, paired_users={list(self.paired_users)}")
             return False
     
     async def _handle_start(self, update, context):
@@ -376,9 +387,16 @@ You can also just send me messages and I'll respond using my available tools."""
             return
         
         # Check if user is allowed
+        # In private chats, chat.id == user.id, but check both to be safe
         logger.debug(f"Checking message from user_id={user.id} (type={type(user.id)}), chat_id={chat.id} (type={type(chat.id)})")
         is_allowed = self._is_allowed_user(user.id, user.username)
-        logger.debug(f"User {user.id} allowed status: {is_allowed}")
+        
+        # Also check chat.id in case there's a mismatch (shouldn't happen in private chats, but be safe)
+        if not is_allowed and chat.type == "private" and chat.id != user.id:
+            logger.warning(f"chat.id ({chat.id}) != user.id ({user.id}) in private chat - checking chat.id too")
+            is_allowed = self._is_allowed_user(chat.id, user.username)
+        
+        logger.debug(f"User {user.id} (chat {chat.id}) allowed status: {is_allowed}")
         
         if chat.type == "private" and not is_allowed:
             # Check if they have a pending pairing
