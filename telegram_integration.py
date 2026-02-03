@@ -217,28 +217,39 @@ You can also just send me messages and I'll respond using my available tools."""
     
     async def _process_message(self, message: str, user_id: int, chat_id: int) -> str:
         """Process a message through cursor-enhanced"""
-        # This is a simplified version - in a full implementation,
-        # this would call cursor-agent with the message and return the response
-        # For now, return a placeholder
+        import subprocess
+        import os
         
-        if self.openclaw:
-            # List available tools
-            tools = self.openclaw.list_tools()
-            tool_names = [t.get('name') for t in tools]
+        # Route message through cursor-agent
+        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+        
+        # Build command with OpenClaw enabled
+        cmd = ["bash", cursor_agent_path, "--enable-openclaw", "-p", message]
+        
+        try:
+            # Run cursor-agent and capture output
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120
+            )
             
-            response = f"I received your message: {message}\n\n"
-            response += f"I have access to {len(tools)} tools: {', '.join(tool_names[:10])}"
-            
-            if "what can you do" in message.lower() or "what tools" in message.lower():
-                response += "\n\n**Available Tools:**\n"
-                for tool in tools:
-                    name = tool.get('name')
-                    desc = tool.get('description', '')
-                    response += f"- **{name}**: {desc[:80]}\n"
-            
-            return response
-        else:
-            return f"I received: {message}\n\nOpenClaw integration is not fully available."
+            if result.returncode == 0:
+                response = result.stdout.strip()
+                if not response:
+                    response = "I processed your message but didn't get a response."
+                return response
+            else:
+                error_msg = result.stderr.strip() or "Unknown error"
+                logger.error(f"cursor-agent error: {error_msg}")
+                return f"Sorry, I encountered an error processing your message: {error_msg}"
+        except subprocess.TimeoutExpired:
+            return "Sorry, the request timed out. Please try again."
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            return f"Sorry, I encountered an error: {str(e)}"
 
 def load_telegram_config(config_file: Optional[str] = None) -> Optional[TelegramConfig]:
     """Load Telegram configuration from config file or environment"""

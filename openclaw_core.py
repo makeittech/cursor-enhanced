@@ -923,8 +923,42 @@ class ToolRegistry:
             tool_info = {"name": name}
             if hasattr(tool, '__class__'):
                 tool_info["type"] = tool.__class__.__name__
+            
+            # Get description from docstring
             if hasattr(tool, '__doc__') and tool.__doc__:
-                tool_info["description"] = tool.__doc__.strip().split('\n')[0]
+                doc = tool.__doc__.strip()
+                # Get first paragraph (up to first blank line or 200 chars)
+                lines = doc.split('\n')
+                desc_lines = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        break
+                    desc_lines.append(line)
+                    if len(' '.join(desc_lines)) > 200:
+                        break
+                tool_info["description"] = ' '.join(desc_lines)
+            else:
+                # Fallback descriptions for known tools
+                desc_map = {
+                    "memory_search": "Search MEMORY.md and memory/*.md files for information",
+                    "memory_get": "Get specific content from memory files by path and line numbers",
+                    "web_fetch": "Fetch and extract content from web URLs (supports markdown/text extraction)",
+                    "web_search": "Search the web (requires API integration)",
+                    "browser": "Control browser for web automation (requires gateway)",
+                    "canvas": "Control visual canvas workspace (requires gateway)",
+                    "nodes": "Control device nodes - camera, screen, location, notifications (requires gateway)",
+                    "cron": "Manage scheduled tasks and cron jobs (requires gateway)",
+                    "sessions_list": "List active sessions (requires gateway)",
+                    "sessions_send": "Send messages between sessions (requires gateway)",
+                    "sessions_history": "Get session conversation history (requires gateway)",
+                    "sessions_spawn": "Spawn background sub-agent sessions (requires gateway)",
+                    "session_status": "Get status of a session (requires gateway)",
+                    "message": "Send messages to channels (requires gateway)",
+                    "agents_list": "List available agents"
+                }
+                tool_info["description"] = desc_map.get(name, f"{name} tool")
+            
             tools.append(tool_info)
         return tools
     

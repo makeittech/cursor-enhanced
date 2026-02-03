@@ -555,8 +555,9 @@ def main():
         
         if tools_info:
             full_prompt_parts.append("\n".join(tools_info) + "\n")
-            full_prompt_parts.append("\nYou have access to these tools and can use them to help the user. "
-                                   "When you need to use a tool, describe what you're doing.\n\n")
+            full_prompt_parts.append("\n**IMPORTANT: You have access to these tools and can use them to help the user.**\n")
+            full_prompt_parts.append("When the user asks what you can do or what tools you have, list ALL available tools from above.\n")
+            full_prompt_parts.append("You can use these tools by describing what you want to do - the system will execute them for you.\n\n")
     
     full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
