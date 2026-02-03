@@ -87,7 +87,9 @@ class TelegramBot:
                             if new_paired != old_paired_set or force_reload:
                                 self.paired_users = new_paired
                                 if force_reload or len(new_paired) != old_paired_count:
-                                    logger.info(f"Loaded {len(self.paired_users)} paired users from disk (was {old_paired_count}, file had: {paired_list})")
+                                    logger.info(f"Loaded {len(self.paired_users)} paired users from disk (was {old_paired_count}, file had: {paired_list}, converted to: {list(new_paired)})")
+                                    if force_reload:
+                                        logger.debug(f"Force reload: old_set={old_paired_set}, new_set={new_paired}, match={new_paired == old_paired_set}")
                         if "pending_pairings" in data:
                             self.pending_pairings = dict(data["pending_pairings"])
                             if len(self.pending_pairings) > 0:
