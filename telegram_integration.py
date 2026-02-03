@@ -311,7 +311,12 @@ class TelegramBot:
                     if user_str == allowed or (username_lower and username_lower == allowed.lower()):
                         logger.info(f"User {user_id_int} found in allowlist: {allowed}")
                         return True
-                logger.info(f"User {user_id_int} NOT in allowlist, denying access")
+                # User not in allowlist - but check if they're paired
+                logger.info(f"User {user_id_int} NOT in allowlist, checking if paired...")
+                if user_id_int in self.paired_users:
+                    logger.info(f"User {user_id_int} is paired, allowing access despite not being in allowlist")
+                    return True
+                logger.info(f"User {user_id_int} NOT in allowlist and NOT paired, denying access")
                 return False
             logger.info(f"Open policy with no allowlist - allowing all")
             return True  # Open policy with no allowlist = allow all
