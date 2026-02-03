@@ -254,7 +254,11 @@ def summarize_history(history, cursor_flags):
     try:
         # We use --print to get stdout
         cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
-        cmd = ["bash", cursor_agent_path] + cursor_flags + ["-p", summary_prompt]
+        # Ensure --force is in flags for summarization too
+        summary_flags = cursor_flags.copy()
+        if "--force" not in summary_flags and "-f" not in summary_flags:
+            summary_flags.append("--force")
+        cmd = ["bash", cursor_agent_path] + summary_flags + ["-p", summary_prompt]
         
         result = subprocess.run(
             cmd,
