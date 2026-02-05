@@ -2,13 +2,14 @@ import sys
 import os
 import json
 import subprocess
+import time
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import asyncio
 import re
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple, List
 
 # OpenClaw integration imports
 OPENCLAW_AVAILABLE = False
@@ -26,6 +27,22 @@ DEFAULT_HISTORY_LIMIT = 10
 TOKEN_LIMIT = 100000
 # Approximating 1 token as 4 characters
 CHARS_PER_TOKEN = 4
+
+# Memory flush settings (OpenClaw-style pre-compaction)
+MEMORY_FLUSH_NO_REPLY = "NO_REPLY"
+DEFAULT_MEMORY_FLUSH_SOFT_TOKENS = 4000
+DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR = 20000
+DEFAULT_MEMORY_FLUSH_PROMPT = (
+    "Pre-compaction memory flush. Store durable memories now. "
+    "Write durable facts to MEMORY.md and day-to-day notes to memory/YYYY-MM-DD.md "
+    "(create memory/ if needed). Preserve role separation (User vs Agent) in the notes. "
+    f"If nothing to store, reply with {MEMORY_FLUSH_NO_REPLY}."
+)
+DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT = (
+    "Pre-compaction memory flush turn. The session is near auto-compaction; "
+    "capture durable memories to disk with role separation (User vs Agent). "
+    f"If no user-visible reply is needed, start with {MEMORY_FLUSH_NO_REPLY}."
+)
 
 # Logging configuration
 LOG_DIR = os.path.expanduser("~/.cursor-enhanced/logs")
@@ -49,16 +66,40 @@ def setup_logging():
 
 logger = setup_logging()
 
-def get_history_file(chat_name=None):
+def sanitize_chat_name(chat_name: Optional[str]) -> Optional[str]:
     if not chat_name:
-        return DEFAULT_HISTORY_FILE
-    
-    # Sanitize chat name to be safe for filename
+        return None
     safe_name = "".join(c for c in chat_name if c.isalnum() or c in ('_', '-'))
+    return safe_name or "default"
+
+def get_history_file(chat_name: Optional[str] = None) -> str:
+    safe_name = sanitize_chat_name(chat_name)
     if not safe_name:
-        safe_name = "default"
-    
+        return DEFAULT_HISTORY_FILE
     return os.path.expanduser(f"~/.cursor-enhanced-history-{safe_name}.json")
+
+def get_history_meta_file(chat_name: Optional[str] = None) -> str:
+    safe_name = sanitize_chat_name(chat_name)
+    meta_dir = os.path.expanduser("~/.cursor-enhanced")
+    if not safe_name:
+        return os.path.join(meta_dir, "history-meta.json")
+    return os.path.join(meta_dir, f"history-meta-{safe_name}.json")
+
+def load_history_meta(filepath: str) -> Dict[str, Any]:
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+def save_history_meta(meta: Dict[str, Any], filepath: str):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=2)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -238,12 +279,167 @@ def format_history_for_prompt(history):
     
     return formatted_context
 
-def summarize_history(history, cursor_flags):
+def normalize_non_negative_int(value: Any) -> Optional[int]:
+    if not isinstance(value, (int, float)):
+        return None
+    if not (value == value):  # NaN check
+        return None
+    int_value = int(value)
+    return int_value if int_value >= 0 else None
+
+def ensure_no_reply_hint(text: str) -> str:
+    if MEMORY_FLUSH_NO_REPLY in text:
+        return text
+    return f"{text}\n\nIf no user-visible reply is needed, start with {MEMORY_FLUSH_NO_REPLY}."
+
+def resolve_memory_flush_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    compaction_cfg = config.get("agents", {}).get("defaults", {}).get("compaction", {})
+    memory_flush_cfg = compaction_cfg.get("memoryFlush") or config.get("memory_flush") or {}
+    enabled = memory_flush_cfg.get("enabled", True)
+    if enabled is False:
+        return None
+
+    soft_threshold_tokens = normalize_non_negative_int(
+        memory_flush_cfg.get("softThresholdTokens")
+    ) or DEFAULT_MEMORY_FLUSH_SOFT_TOKENS
+    reserve_tokens_floor = normalize_non_negative_int(
+        compaction_cfg.get("reserveTokensFloor")
+    ) or DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR
+    prompt = (memory_flush_cfg.get("prompt") or "").strip() or DEFAULT_MEMORY_FLUSH_PROMPT
+    system_prompt = (memory_flush_cfg.get("systemPrompt") or "").strip() or DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT
+
+    return {
+        "enabled": True,
+        "soft_threshold_tokens": soft_threshold_tokens,
+        "reserve_tokens_floor": reserve_tokens_floor,
+        "prompt": ensure_no_reply_hint(prompt),
+        "system_prompt": ensure_no_reply_hint(system_prompt),
+    }
+
+def should_run_memory_flush(total_tokens: int, settings: Dict[str, Any], meta: Dict[str, Any]) -> bool:
+    if total_tokens <= 0:
+        return False
+    context_window = max(1, int(TOKEN_LIMIT))
+    reserve_tokens = max(0, int(settings.get("reserve_tokens_floor", 0)))
+    soft_threshold = max(0, int(settings.get("soft_threshold_tokens", 0)))
+    threshold = max(0, context_window - reserve_tokens - soft_threshold)
+    if threshold <= 0:
+        return False
+    if total_tokens < threshold:
+        return False
+
+    compaction_count = int(meta.get("compaction_count", 0) or 0)
+    next_compaction = compaction_count + 1
+    last_flush_for = meta.get("memory_flush_compaction_count")
+    if isinstance(last_flush_for, int) and last_flush_for == next_compaction:
+        return False
+    return True
+
+def append_memory_entry(file_path: str, content: str) -> bool:
+    if not content or not content.strip():
+        return False
+    content = content.strip()
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    needs_spacing = os.path.exists(file_path) and os.path.getsize(file_path) > 0
+    with open(file_path, 'a', encoding='utf-8') as f:
+        if needs_spacing:
+            f.write("\n\n")
+        f.write(content)
+        f.write("\n")
+    return True
+
+def _parse_memory_flush_json(output: str) -> Optional[Dict[str, Any]]:
+    if not output:
+        return None
+    try:
+        parsed = json.loads(output)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start = output.find("{")
+    end = output.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(output[start:end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+def run_memory_flush(history: List[Dict[str, Any]], cursor_flags: List[str],
+                     settings: Dict[str, Any], logger) -> bool:
+    if not history:
+        return False
+
+    split_idx = max(1, len(history) // 2)
+    flush_messages = history[:split_idx]
+    formatted_history = format_history_for_prompt(flush_messages)
+
+    flush_prompt = (
+        f"{settings.get('system_prompt')}\n\n"
+        f"{settings.get('prompt')}\n\n"
+        "Return ONLY one of the following:\n"
+        f"- {MEMORY_FLUSH_NO_REPLY}\n"
+        "- A single JSON object with keys \"memory\" and \"daily\" containing markdown.\n"
+        "If a key has no content, use an empty string.\n\n"
+        "Conversation history (roles preserved):\n"
+        f"{formatted_history}"
+    )
+
+    logger.info("Starting memory flush before compaction.")
+    try:
+        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+        flush_flags = cursor_flags.copy()
+        if "--force" not in flush_flags and "-f" not in flush_flags:
+            flush_flags.append("--force")
+        cmd = ["bash", cursor_agent_path] + flush_flags + ["-p", flush_prompt]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=180
+        )
+        if result.returncode != 0:
+            logger.warning(f"Memory flush failed: {result.stderr.strip()}")
+            return False
+
+        output = result.stdout.strip()
+        if not output:
+            return False
+        if MEMORY_FLUSH_NO_REPLY in output.split():
+            return True
+
+        parsed = _parse_memory_flush_json(output)
+        if not parsed:
+            logger.warning("Memory flush output was not valid JSON; skipping write.")
+            return False
+
+        memory_content = str(parsed.get("memory", "") or "").strip()
+        daily_content = str(parsed.get("daily", "") or "").strip()
+
+        workspace_dir = os.path.expanduser("~/.cursor-enhanced/workspace")
+        memory_dir = os.path.join(workspace_dir, "memory")
+        memory_file = os.path.join(workspace_dir, "MEMORY.md")
+        daily_file = os.path.join(memory_dir, f"{datetime.now().strftime('%Y-%m-%d')}.md")
+
+        wrote = False
+        if memory_content:
+            wrote = append_memory_entry(memory_file, memory_content) or wrote
+        if daily_content:
+            wrote = append_memory_entry(daily_file, daily_content) or wrote
+        return True
+    except Exception as e:
+        logger.exception(f"Memory flush error: {e}")
+        return False
+
+def summarize_history(history, cursor_flags) -> Tuple[List[Dict[str, Any]], bool]:
     # Construct a prompt to summarize the history
     # We will summarize the FIRST half of the history to compress it.
     
     if len(history) < 2:
-        return history
+        return history, False
 
     # We will summarize the oldest 50% of messages.
     split_idx = len(history) // 2
@@ -300,18 +496,18 @@ def summarize_history(history, cursor_flags):
                 "content": f"Previous conversation summary: {summary}"
             }
             # New history is Summary + Recent Messages
-            return [summary_entry] + recent_messages
+            return [summary_entry] + recent_messages, True
         else:
             error_msg = f"Summarization failed: {result.stderr}"
             print(error_msg, file=sys.stderr)
             logger.error(error_msg)
-            return history
+            return history, False
             
     except Exception as e:
         error_msg = f"Summarization error: {e}"
         print(error_msg, file=sys.stderr)
         logger.exception(error_msg)
-        return history
+        return history, False
 
 def main():
     # Load config first to check for defaults
@@ -548,10 +744,13 @@ def main():
         return
 
     history_file = get_history_file(args.chat)
+    meta_file = get_history_meta_file(args.chat)
 
     if args.clear_history:
         if os.path.exists(history_file):
             os.remove(history_file)
+        if os.path.exists(meta_file):
+            os.remove(meta_file)
         msg = f"History cleared for session: {args.chat if args.chat else 'default'}"
         print(msg)
         logger.info(msg)
@@ -655,6 +854,7 @@ def main():
 
     # Load config and history
     history = load_history(history_file)
+    history_meta = load_history_meta(meta_file)
     
     # Resolve system prompt
     system_prompt_content = ""
@@ -674,6 +874,17 @@ def main():
     # Calculate Token Usage and Prepare Context
     system_prompt_tokens = estimate_tokens(system_prompt_content)
     user_prompt_tokens = estimate_tokens("User Current Request: " + user_prompt)
+
+    # Pre-compaction memory flush (OpenClaw-style)
+    memory_flush_settings = resolve_memory_flush_settings(config)
+    total_history_text = format_history_for_prompt(history)
+    total_estimated_all = estimate_tokens(total_history_text) + system_prompt_tokens + user_prompt_tokens
+    if memory_flush_settings and should_run_memory_flush(total_estimated_all, memory_flush_settings, history_meta):
+        if run_memory_flush(history, cursor_flags, memory_flush_settings, logger):
+            compaction_count = int(history_meta.get("compaction_count", 0) or 0)
+            history_meta["memory_flush_compaction_count"] = compaction_count + 1
+            history_meta["memory_flush_at"] = int(time.time() * 1000)
+            save_history_meta(history_meta, meta_file)
     
     # If args.history_limit is set, we use it as a hard limit on count.
     # Otherwise, we use token limit logic.
@@ -688,8 +899,11 @@ def main():
         # But user asked for specific limit.
         # However, we should still respect TOKEN_LIMIT overall to avoid API errors.
         if estimate_tokens(total_text) > TOKEN_LIMIT:
-            logger.info(f"Token limit exceeded in fixed-limit mode. Triggering summarization.")
-            history = summarize_history(history, cursor_flags)
+            logger.info("Token limit exceeded in fixed-limit mode. Triggering summarization.")
+            history, summarized = summarize_history(history, cursor_flags)
+            if summarized:
+                history_meta["compaction_count"] = int(history_meta.get("compaction_count", 0) or 0) + 1
+                save_history_meta(history_meta, meta_file)
             save_history(history, history_file)
             # Re-fetch
             context_history = history[-args.history_limit:] if args.history_limit > 0 else []
@@ -701,10 +915,13 @@ def main():
         total_estimated = estimate_tokens(all_history_text) + system_prompt_tokens + user_prompt_tokens
         
         if total_estimated > TOKEN_LIMIT:
-             # We are over the limit. Trigger compression on the main history first.
-             logger.info(f"Total history ({total_estimated} tokens) exceeds limit. Summarizing...")
-             history = summarize_history(history, cursor_flags)
-             save_history(history, history_file)
+            # We are over the limit. Trigger compression on the main history first.
+            logger.info(f"Total history ({total_estimated} tokens) exceeds limit. Summarizing...")
+            history, summarized = summarize_history(history, cursor_flags)
+            if summarized:
+                history_meta["compaction_count"] = int(history_meta.get("compaction_count", 0) or 0) + 1
+                save_history_meta(history_meta, meta_file)
+            save_history(history, history_file)
              
              # Re-calculate with compressed history
              # Even after compression, we might still be over (if recent messages are huge).
