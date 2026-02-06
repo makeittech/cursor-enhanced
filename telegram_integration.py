@@ -40,6 +40,7 @@ class TelegramConfig:
     groups: Optional[Dict[str, Any]] = None  # Group configuration
     webhook_url: Optional[str] = None
     webhook_secret: Optional[str] = None
+    timeout_seconds: int = 180  # Timeout for message processing (default: 180 seconds / 3 minutes)
 
 class TelegramBot:
     """Telegram bot for cursor-enhanced"""
@@ -539,12 +540,14 @@ You can also just send me messages and I'll respond using my available tools."""
             logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
             
             # Run cursor-enhanced and capture output
+            timeout = self.config.timeout_seconds
+            logger.debug(f"Processing message with timeout: {timeout} seconds")
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=120,
+                timeout=timeout,
                 cwd=os.path.expanduser("~"),
                 env=run_env
             )
@@ -563,8 +566,9 @@ You can also just send me messages and I'll respond using my available tools."""
                     return f"Sorry, I encountered an error: {error_msg[:500]}"
                 return "Sorry, I encountered an error processing your message. Please try again."
         except subprocess.TimeoutExpired:
-            logger.warning("Message processing timed out")
-            return "Sorry, the request timed out. Please try again with a simpler question."
+            timeout = self.config.timeout_seconds
+            logger.warning(f"Message processing timed out after {timeout} seconds. Message: {message[:100]}")
+            return f"Sorry, the request timed out after {timeout} seconds. This may happen with complex requests. You can increase the timeout in your configuration, or try breaking your request into smaller parts."
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
@@ -600,7 +604,8 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         allow_from=telegram_config.get("allowFrom"),
         groups=telegram_config.get("groups"),
         webhook_url=telegram_config.get("webhookUrl"),
-        webhook_secret=telegram_config.get("webhookSecret")
+        webhook_secret=telegram_config.get("webhookSecret"),
+        timeout_seconds=telegram_config.get("timeoutSeconds", 180)  # Default: 180 seconds (3 minutes)
     )
 
 async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None):
