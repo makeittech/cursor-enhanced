@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -96,3 +97,37 @@ class DelegateToolTests(unittest.TestCase):
         self.assertEqual(d["id"], "x")
         self.assertEqual(d["name"], "X")
         self.assertEqual(d["system_prompt"], "Be X.")
+
+    @patch("subprocess.run")
+    def test_execute_timeout_returns_error(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="cursor-agent", timeout=120)
+
+        async def run():
+            tool = DelegateTool(config={})
+            out = await tool.execute(persona_id="researcher", task="Long task.", timeout_seconds=120)
+            self.assertFalse(out.get("success"))
+            self.assertIn("timed out", out.get("error", "").lower())
+            self.assertEqual(out.get("persona_id"), "researcher")
+
+        asyncio.run(run())
+
+    @patch("subprocess.run")
+    def test_execute_file_not_found_returns_error(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+
+        async def run():
+            tool = DelegateTool(config={}, cursor_agent_path="/nonexistent/cursor-agent")
+            out = await tool.execute(persona_id="coder", task="Write code.")
+            self.assertFalse(out.get("success"))
+            self.assertIn("not found", out.get("error", "").lower())
+            self.assertEqual(out.get("persona_id"), "coder")
+
+        asyncio.run(run())
+
+    def test_cursor_agent_path_from_config(self):
+        tool = DelegateTool(config={"cursor_agent_path": "/custom/path/cursor-agent"})
+        self.assertEqual(tool._cursor_agent_path, "/custom/path/cursor-agent")
+
+    def test_cursor_agent_path_from_config_delegate_key(self):
+        tool = DelegateTool(config={"delegate": {"cursor_agent_path": "/delegate/path/agent"}})
+        self.assertEqual(tool._cursor_agent_path, "/delegate/path/agent")

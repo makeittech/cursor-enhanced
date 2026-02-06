@@ -343,19 +343,33 @@ class PresenceManager:
         """Check if a session is typing"""
         return self.typing_sessions.get(session_key, False)
 
+def _load_integration_config() -> Dict[str, Any]:
+    """Load config from ~/.cursor-enhanced-config.json for tool registry (e.g. delegate personas)."""
+    config_path = os.path.expanduser("~/.cursor-enhanced-config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+    return {}
+
+
 # Main OpenClaw Integration Class
 class OpenClawIntegration:
     """Main integration class that brings OpenClaw features to cursor-enhanced"""
     
-    def __init__(self):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config if config is not None else _load_integration_config()
         if OPENCLAW_CORE_AVAILABLE:
             # Use core implementations
             from openclaw_core import ToolRegistry
             self.session_store = SessionStore()
             self.skills_manager = SkillsManager()
             self.gateway_client: Optional[GatewayClient] = None
-            # Initialize tool registry even without gateway (for memory tools, etc.)
-            self.tool_registry = ToolRegistry(gateway_client=None, config={})
+            # Initialize tool registry with config (e.g. agent_personas, cursor_agent_path for delegate)
+            self.tool_registry = ToolRegistry(gateway_client=None, config=self.config)
         else:
             # Fallback to basic implementations
             self.tool_registry = ToolRegistry()
@@ -502,9 +516,9 @@ class OpenClawIntegration:
 # Global instance
 _openclaw_integration: Optional[OpenClawIntegration] = None
 
-def get_openclaw_integration() -> OpenClawIntegration:
-    """Get or create the global OpenClaw integration instance"""
+def get_openclaw_integration(config: Optional[Dict[str, Any]] = None) -> OpenClawIntegration:
+    """Get or create the global OpenClaw integration instance. Optionally pass config (e.g. from load_config()); if omitted, config is loaded from ~/.cursor-enhanced-config.json."""
     global _openclaw_integration
     if _openclaw_integration is None:
-        _openclaw_integration = OpenClawIntegration()
+        _openclaw_integration = OpenClawIntegration(config=config)
     return _openclaw_integration

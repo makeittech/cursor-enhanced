@@ -77,7 +77,12 @@ class DelegateTool:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, cursor_agent_path: Optional[str] = None):
         self.config = config or {}
-        self._cursor_agent_path = cursor_agent_path or os.path.expanduser("~/.local/bin/cursor-agent")
+        self._cursor_agent_path = (
+            cursor_agent_path
+            or self.config.get("cursor_agent_path")
+            or (self.config.get("delegate") or {}).get("cursor_agent_path")
+            or os.path.expanduser("~/.local/bin/cursor-agent")
+        )
         self._personas: Dict[str, AgentPersona] = {}
         self._load_personas()
 

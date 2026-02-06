@@ -27,3 +27,5 @@ When working in the **cursor-enhanced** project (`~/cursor-enhanced` or any path
    - Config: `~/.cursor-enhanced-config.json`; workspace under `~/.cursor-enhanced/`.
 
 Follow this workflow so the project stays test-covered and deployable.
+
+**Remember:** This rule file lives in the project at `.cursor/rules/cursor-enhanced-workflow.mdc`. If you use global Cursor rules, add a line there that says: when working in the cursor-enhanced project, apply the workflow in `.cursor/rules/cursor-enhanced-workflow.mdc` (commit, test before reload, feature discipline).

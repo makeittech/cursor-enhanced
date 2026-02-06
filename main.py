@@ -696,7 +696,8 @@ def main():
             if OPENCLAW_AVAILABLE and args.enable_openclaw:
                 try:
                     from openclaw_integration import get_openclaw_integration
-                    openclaw = get_openclaw_integration()
+                    app_config = load_config()
+                    openclaw = get_openclaw_integration(config=app_config)
                 except Exception as e:
                     logger.warning(f"Failed to initialize OpenClaw: {e}")
             
@@ -715,7 +716,7 @@ def main():
         try:
             from openclaw_integration import get_openclaw_integration
             from mcp_tools import get_mcp_client
-            openclaw = get_openclaw_integration()
+            openclaw = get_openclaw_integration(config=config)
             mcp_client = get_mcp_client()
             
             # Connect to gateway if URL provided
