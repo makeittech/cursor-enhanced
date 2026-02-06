@@ -626,7 +626,7 @@ def main():
             from telegram_integration import load_telegram_config, TelegramBot, TelegramConfig
             import json as json_module
             
-            config = load_telegram_config()
+            config, config_data = load_telegram_config()
             if not config:
                 print("Error: Telegram not configured. Set TELEGRAM_BOT_TOKEN or configure in ~/.cursor-enhanced-config.json")
                 sys.exit(1)
@@ -645,7 +645,7 @@ def main():
             
             # Create a temporary bot instance to approve pairing
             # We don't need to start it, just use the approve method
-            bot = TelegramBot(config, openclaw_integration=None)
+            bot = TelegramBot(config, openclaw_integration=None, config_data=config_data)
             code_upper = args.telegram_approve.upper()
             if bot.approve_pairing(code_upper):
                 print(f"✅ Pairing code {args.telegram_approve} approved successfully!")
@@ -686,7 +686,7 @@ def main():
             from telegram_integration import run_telegram_bot, load_telegram_config
             from openclaw_integration import get_openclaw_integration
             
-            config = load_telegram_config()
+            config, config_data = load_telegram_config()
             if not config:
                 print("Error: Telegram bot token required.")
                 print("Set TELEGRAM_BOT_TOKEN environment variable or configure in ~/.cursor-enhanced-config.json")
@@ -701,7 +701,7 @@ def main():
                     logger.warning(f"Failed to initialize OpenClaw: {e}")
             
             print("Starting Telegram bot...")
-            asyncio.run(run_telegram_bot(config, openclaw))
+            asyncio.run(run_telegram_bot(config, openclaw, config_data=config_data))
         except ImportError:
             print("Telegram integration not available. Install with: pip install python-telegram-bot")
         except Exception as e:

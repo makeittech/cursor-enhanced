@@ -14,6 +14,18 @@ from dataclasses import dataclass
 
 logger = logging.getLogger("cursor_enhanced.telegram")
 
+# Agent timeout configuration (following OpenClaw pattern)
+DEFAULT_AGENT_TIMEOUT_SECONDS = 600  # 10 minutes, matching OpenClaw default
+
+def resolve_agent_timeout_seconds(config_data: Optional[Dict[str, Any]] = None) -> int:
+    """Resolve agent timeout from config, following OpenClaw's resolveAgentTimeoutSeconds pattern"""
+    if config_data:
+        agents_defaults = config_data.get("agents", {}).get("defaults", {})
+        timeout_raw = agents_defaults.get("timeoutSeconds")
+        if isinstance(timeout_raw, (int, float)) and timeout_raw > 0:
+            return max(1, int(timeout_raw))
+    return DEFAULT_AGENT_TIMEOUT_SECONDS
+
 # Try to import telegram bot library
 try:
     from telegram import Update, Bot
@@ -40,17 +52,18 @@ class TelegramConfig:
     groups: Optional[Dict[str, Any]] = None  # Group configuration
     webhook_url: Optional[str] = None
     webhook_secret: Optional[str] = None
-    timeout_seconds: int = 180  # Timeout for message processing (default: 180 seconds / 3 minutes)
+    timeout_seconds: Optional[int] = None  # Telegram API client timeout in seconds (grammY ApiClientOptions)
 
 class TelegramBot:
     """Telegram bot for cursor-enhanced"""
     
-    def __init__(self, config: TelegramConfig, openclaw_integration=None):
+    def __init__(self, config: TelegramConfig, openclaw_integration=None, config_data: Optional[Dict[str, Any]] = None):
         if not TELEGRAM_AVAILABLE or Update is None:
             raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
         
         self.config = config
         self.openclaw = openclaw_integration
+        self.config_data = config_data  # Store full config for timeout resolution
         self.application = None
         self.bot = None
         self.pairing_store_path = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
@@ -504,6 +517,7 @@ You can also just send me messages and I'll respond using my available tools."""
             logger.error(f"Error processing Telegram message: {e}", exc_info=True)
             await message.reply_text(f"Sorry, I encountered an error: {str(e)}")
     
+    
     async def _process_message(self, message: str, user_id: int, chat_id: int) -> str:
         """Process a message through cursor-enhanced"""
         import subprocess
@@ -539,15 +553,18 @@ You can also just send me messages and I'll respond using my available tools."""
         try:
             logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
             
+            # Resolve agent timeout (for subprocess execution), following OpenClaw pattern
+            # Use stored config_data or resolve from global function
+            agent_timeout = resolve_agent_timeout_seconds(self.config_data)
+            logger.debug(f"Processing message with agent timeout: {agent_timeout} seconds")
+            
             # Run cursor-enhanced and capture output
-            timeout = self.config.timeout_seconds
-            logger.debug(f"Processing message with timeout: {timeout} seconds")
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
+                timeout=agent_timeout,
                 cwd=os.path.expanduser("~"),
                 env=run_env
             )
@@ -566,9 +583,9 @@ You can also just send me messages and I'll respond using my available tools."""
                     return f"Sorry, I encountered an error: {error_msg[:500]}"
                 return "Sorry, I encountered an error processing your message. Please try again."
         except subprocess.TimeoutExpired:
-            timeout = self.config.timeout_seconds
-            logger.warning(f"Message processing timed out after {timeout} seconds. Message: {message[:100]}")
-            return f"Sorry, the request timed out after {timeout} seconds. This may happen with complex requests. You can increase the timeout in your configuration, or try breaking your request into smaller parts."
+            agent_timeout = resolve_agent_timeout_seconds(self.config_data)
+            logger.warning(f"Message processing timed out after {agent_timeout} seconds. Message: {message[:100]}")
+            return f"Sorry, the request timed out after {agent_timeout} seconds. This may happen with complex requests. You can increase the timeout via agents.defaults.timeoutSeconds in your configuration, or try breaking your request into smaller parts."
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
@@ -597,6 +614,17 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
     if not bot_token:
         return None
     
+    # Telegram API client timeout (for grammY ApiClientOptions, like OpenClaw)
+    timeout_seconds_raw = telegram_config.get("timeoutSeconds")
+    timeout_seconds = None
+    if timeout_seconds_raw is not None:
+        try:
+            timeout_seconds_val = int(timeout_seconds_raw)
+            if timeout_seconds_val > 0:
+                timeout_seconds = max(1, timeout_seconds_val)  # Ensure at least 1 second
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid timeoutSeconds value: {timeout_seconds_raw}, ignoring")
+    
     return TelegramConfig(
         bot_token=bot_token,
         enabled=telegram_config.get("enabled", True),
@@ -605,21 +633,21 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         groups=telegram_config.get("groups"),
         webhook_url=telegram_config.get("webhookUrl"),
         webhook_secret=telegram_config.get("webhookSecret"),
-        timeout_seconds=telegram_config.get("timeoutSeconds", 180)  # Default: 180 seconds (3 minutes)
+        timeout_seconds=timeout_seconds  # Telegram API client timeout (grammY), not agent execution timeout
     )
 
-async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None):
+async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None, config_data: Optional[Dict[str, Any]] = None):
     """Run the Telegram bot"""
     if not TELEGRAM_AVAILABLE or Update is None:
         raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
     
     if config is None:
-        config = load_telegram_config()
+        config, config_data = load_telegram_config()
     
     if not config or not config.bot_token:
         raise ValueError("Telegram bot token is required. Set TELEGRAM_BOT_TOKEN env var or configure in ~/.cursor-enhanced-config.json")
     
-    bot = TelegramBot(config, openclaw_integration)
+    bot = TelegramBot(config, openclaw_integration, config_data=config_data)
     await bot.start()
     
     # Keep running until interrupted
