@@ -41,6 +41,11 @@ async def execute_tool_from_response(
             r'search(?:ing)?\s+(?:the\s+)?memory\s+(?:for)?\s+["\']?([^"\']+)["\']?',
             r'look(?:ing)?\s+(?:in|through)\s+memory\s+(?:for)?\s+["\']?([^"\']+)["\']?',
         ],
+        'delegate': [
+            r'delegate\s+(?:to|task to)\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s*[:\-]\s*([^\n]+?)(?=\n\n|\n\[|$)',
+            r'ask\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s+(?:agent\s+)?to\s+([^\n]+?)(?=\n\n|\n\[|$)',
+            r'have\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s+([^\n]+?)(?=\n\n|\n\[|$)',
+        ],
     }
     
     # Extract URLs from response
@@ -174,5 +179,31 @@ async def execute_tool_from_response(
             logger.error(f"Failed to execute memory_search for {query}: {e}", exc_info=True)
             tool_results.append({"tool": "memory_search", "query": query, "error": str(e)})
             updated_response += f"\n\n[Tool Error: memory_search for '{query}']\nError: {str(e)}"
-    
+
+    # Delegate: extract "delegate to <persona>: <task>" or "ask the <persona> to <task>"
+    delegate_matches = []
+    for pattern in tool_patterns.get("delegate", []):
+        for match in re.finditer(pattern, agent_response, re.IGNORECASE | re.DOTALL):
+            if match.lastindex and match.lastindex >= 2:
+                persona_id = (match.group(1) or "").strip().lower()
+                task = (match.group(2) or "").strip()
+                if persona_id and task and len(task) > 5:
+                    delegate_matches.append((persona_id, task))
+    for persona_id, task in delegate_matches[:1]:  # Limit 1 delegate per response to avoid long runs
+        try:
+            logger.info(f"Executing delegate tool: persona={persona_id}, task={task[:80]}...")
+            result = await openclaw_integration.tool_registry.execute(
+                "delegate", "", {"persona_id": persona_id, "task": task}
+            )
+            tool_results.append({"tool": "delegate", "persona_id": persona_id, "result": result})
+            if result.get("success"):
+                resp = result.get("response", "") or ""
+                updated_response += f"\n\n[Delegate Result: {persona_id}]\n{resp[:4000]}{'...' if len(resp) > 4000 else ''}"
+            else:
+                updated_response += f"\n\n[Delegate Error: {persona_id}] {result.get('error', 'Unknown error')}"
+        except Exception as e:
+            logger.error(f"Failed to run delegate for {persona_id}: {e}")
+            tool_results.append({"tool": "delegate", "persona_id": persona_id, "error": str(e)})
+            updated_response += f"\n\n[Delegate Error: {persona_id}] {str(e)}"
+
     return updated_response, tool_results

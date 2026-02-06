@@ -1,0 +1,29 @@
+---
+description: Cursor Enhanced project workflow — commit, test before reload, feature discipline
+globs: ["**/cursor-enhanced/**", "cursor-enhanced/**", "**/cursor_enhanced/**"]
+alwaysApply: false
+---
+
+# Cursor Enhanced workflow (do not forget)
+
+When working in the **cursor-enhanced** project (`~/cursor-enhanced` or any path under it):
+
+1. **Commit**  
+   After making changes, commit them (with a clear message). Do not leave the repo dirty unless the user asks otherwise.
+
+2. **Test before reload**  
+   For every new feature or change that affects runtime behavior:
+   - Add or update tests as needed.
+   - **Run the test suite** (`python -m unittest discover -s tests` from project root) **before** the service/process is reloaded or the agent “updates itself”. If tests fail, fix them before considering the feature done.
+
+3. **Feature discipline**  
+   Each new feature should:
+   - Have a test run (or new tests) that are executed and passing.
+   - Only then be considered complete and safe to rely on after reload.
+
+4. **Project layout**  
+   - Root: `main.py`, `openclaw_*.py`, `tool_executor.py`, `tests/`.
+   - Package: `cursor_enhanced/` (re-exports and CLI).
+   - Config: `~/.cursor-enhanced-config.json`; workspace under `~/.cursor-enhanced/`.
+
+Follow this workflow so the project stays test-covered and deployable.

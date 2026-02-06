@@ -31,6 +31,7 @@ py-modules = [
   "main",
   "mcp_tools",
   "openclaw_core",
+  "openclaw_delegate_tool",
   "openclaw_integration",
   "openclaw_session_tools",
   "openclaw_web_tools",

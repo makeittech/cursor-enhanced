@@ -661,6 +661,14 @@ except ImportError:
     SessionStatusTool = None
     SessionsSpawnTool = None
 
+# Delegate tool (personas / sub-agents)
+try:
+    from openclaw_delegate_tool import DelegateTool
+    DELEGATE_TOOL_AVAILABLE = True
+except ImportError:
+    DELEGATE_TOOL_AVAILABLE = False
+    DelegateTool = None
+
 class BrowserTool:
     """Browser tool (ported from browser-tool.ts)"""
     
@@ -980,7 +988,9 @@ class ToolRegistry:
                     "sessions_spawn": "Spawn background sub-agent sessions (requires gateway)",
                     "session_status": "Get status of a session (requires gateway)",
                     "message": "Send messages to channels (requires gateway)",
-                    "agents_list": "List available agents"
+                    "agents_list": "List available agents",
+                    "delegate": "Delegate a task to a sub-agent with a predefined personality (researcher, coder, reviewer, writer); receive the sub-agent's response",
+                    "personas_list": "List available delegate personas (ids and names)"
                 }
                 tool_info["description"] = desc_map.get(name, f"{name} tool")
             
@@ -1018,6 +1028,11 @@ class ToolRegistry:
         # Agents tool (doesn't require gateway)
         if SESSION_TOOLS_AVAILABLE:
             self.tools["agents_list"] = AgentsListTool(self.gateway_client, self.config)
+
+        # Delegate tool (personas; no gateway)
+        if DELEGATE_TOOL_AVAILABLE and DelegateTool is not None:
+            self.tools["delegate"] = DelegateTool(self.config)
+            self.tools["personas_list"] = self.tools["delegate"]
     
     async def execute(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute tool"""
@@ -1030,9 +1045,12 @@ class ToolRegistry:
             # Tools with action parameter (browser, canvas, nodes, cron)
             if tool_name in ["browser", "canvas", "nodes", "cron"]:
                 return await tool.execute(action, params)
-            # Tools without action parameter (web_fetch, web_search, memory, sessions, message, agents)
-            elif tool_name in ["web_fetch", "web_search", "sessions_list", "sessions_send", 
-                              "sessions_history", "sessions_spawn", "session_status", "message", "agents_list"]:
+            # Tools without action parameter (web_fetch, web_search, memory, sessions, message, agents, delegate, personas_list)
+            elif tool_name in ["web_fetch", "web_search", "sessions_list", "sessions_send",
+                              "sessions_history", "sessions_spawn", "session_status", "message", "agents_list",
+                              "delegate", "personas_list"]:
+                if tool_name == "personas_list":
+                    return {"personas": tool.list_personas()}
                 return await tool.execute(**params)
             elif tool_name == "memory_search":
                 return await tool.search(**params)
@@ -1066,4 +1084,8 @@ if SESSION_TOOLS_AVAILABLE:
         "SessionsListTool", "SessionsSendTool", "SessionsHistoryTool", "MessageTool",
         "AgentsListTool", "SessionStatusTool", "SessionsSpawnTool"
     ])
+
+# Export delegate tool if available
+if DELEGATE_TOOL_AVAILABLE:
+    __all__.extend(["DelegateTool"])
 
