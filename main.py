@@ -11,6 +11,39 @@ import asyncio
 import re
 from typing import Optional, Dict, Any, Tuple, List
 
+# Agent timeout resolution (shared with telegram_integration)
+DEFAULT_AGENT_TIMEOUT_SECONDS = 600  # 10 minutes, matching OpenClaw default
+
+def resolve_agent_timeout_seconds(config_data: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """Resolve agent timeout from config, following OpenClaw's resolveAgentTimeoutSeconds pattern.
+    
+    Returns:
+        int: Timeout in seconds (minimum 1)
+        None: No timeout (unlimited) when timeoutSeconds is 0
+    """
+    if config_data is None:
+        # Load config if not provided
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    config_data = json.load(f)
+            except Exception:
+                pass
+    
+    if config_data:
+        agents_defaults = config_data.get("agents", {}).get("defaults", {})
+        timeout_raw = agents_defaults.get("timeoutSeconds")
+        if timeout_raw is not None:
+            try:
+                timeout_val = int(timeout_raw) if isinstance(timeout_raw, (int, float)) else None
+                if timeout_val == 0:
+                    return None  # 0 means unlimited (no timeout)
+                if timeout_val and timeout_val > 0:
+                    return max(1, timeout_val)
+            except (ValueError, TypeError):
+                pass
+    return DEFAULT_AGENT_TIMEOUT_SECONDS
+
 # OpenClaw integration imports
 OPENCLAW_AVAILABLE = False
 try:
@@ -393,6 +426,22 @@ def run_memory_flush(history: List[Dict[str, Any]], cursor_flags: List[str],
 
     logger.info("Starting memory flush before compaction.")
     try:
+        # Load config for timeout resolution
+        config_data = None
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    config_data = json.load(f)
+            except Exception:
+                pass
+        
+        # Resolve agent timeout (following OpenClaw pattern)
+        agent_timeout = resolve_agent_timeout_seconds(config_data)
+        if agent_timeout is None:
+            logger.info("Memory flush using unlimited timeout (no timeout)")
+        else:
+            logger.debug(f"Memory flush using agent timeout: {agent_timeout} seconds")
+        
         cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
         flush_flags = cursor_flags.copy()
         if "--force" not in flush_flags and "-f" not in flush_flags:
@@ -404,7 +453,7 @@ def run_memory_flush(history: List[Dict[str, Any]], cursor_flags: List[str],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=180
+            timeout=agent_timeout  # None = unlimited, int = timeout in seconds
         )
         if result.returncode != 0:
             logger.warning(f"Memory flush failed: {result.stderr.strip()}")
@@ -472,6 +521,22 @@ def summarize_history(history, cursor_flags) -> Tuple[List[Dict[str, Any]], bool
     logger.info(f"Messages to summarize: {len(old_messages)}")
     
     try:
+        # Load config for timeout resolution
+        config_data = None
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    config_data = json.load(f)
+            except Exception:
+                pass
+        
+        # Resolve agent timeout (following OpenClaw pattern)
+        agent_timeout = resolve_agent_timeout_seconds(config_data)
+        if agent_timeout is None:
+            logger.info("History summarization using unlimited timeout (no timeout)")
+        else:
+            logger.debug(f"History summarization using agent timeout: {agent_timeout} seconds")
+        
         # We use --print to get stdout
         cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
         # Ensure --force is in flags for summarization too
@@ -485,7 +550,7 @@ def summarize_history(history, cursor_flags) -> Tuple[List[Dict[str, Any]], bool
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=180 # Increased timeout for better summarization
+            timeout=agent_timeout  # None = unlimited, int = timeout in seconds
         )
         
         if result.returncode == 0:
@@ -996,7 +1061,9 @@ def main():
     cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
     cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
     
-    # Run and capture output
+    # Main agent execution uses Popen for streaming output
+    # This is interactive CLI execution - no timeout (user can Ctrl+C)
+    # Background operations (memory flush, summarization, Telegram) respect timeout config
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
