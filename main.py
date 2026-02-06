@@ -21,6 +21,11 @@ except ImportError as e:
     # Logger will be set up later, just mark as unavailable
     pass
 
+try:
+    from cursor_enhanced.version import __version__ as APP_VERSION
+except Exception:
+    APP_VERSION = "0.0.0"
+
 DEFAULT_HISTORY_FILE = os.path.expanduser("~/.cursor-enhanced-history.json")
 CONFIG_FILE = os.path.expanduser("~/.cursor-enhanced-config.json")
 DEFAULT_HISTORY_LIMIT = 10
@@ -541,6 +546,7 @@ def main():
     parser.add_argument("--list-skills", action="store_true", help="List available skills")
     parser.add_argument("--gateway-url", type=str, default=None, help="Gateway WebSocket URL (OpenClaw-style)")
     parser.add_argument("--enable-openclaw", action="store_true", default=True, help="Enable OpenClaw integration features")
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
     parser.add_argument("--telegram", action="store_true", help="Start Telegram bot")
     parser.add_argument("--telegram-approve", type=str, metavar="CODE", help="Approve Telegram pairing code")
     parser.add_argument("--telegram-list-pending", action="store_true", help="List pending Telegram pairing codes")
@@ -549,6 +555,10 @@ def main():
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
+
+    if args.version:
+        print(APP_VERSION)
+        return
     
     # Handle Telegram-specific commands
     if args.telegram_list_pending:

@@ -507,28 +507,33 @@ You can also just send me messages and I'll respond using my available tools."""
         """Process a message through cursor-enhanced"""
         import subprocess
         import os
-        import sys
         
         # Get the path to cursor-enhanced (the current script)
         # We'll call cursor-enhanced itself with the message
-        cursor_enhanced_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
-        if not os.path.exists(cursor_enhanced_path):
-            # Try to find it in PATH
-            import shutil
-            cursor_enhanced_path = shutil.which("cursor-enhanced")
-            if not cursor_enhanced_path:
-                # Fallback: use python to run main.py
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                main_py = os.path.join(os.path.dirname(script_dir), "main.py")
-                if os.path.exists(main_py):
-                    cursor_enhanced_path = "python3"
-                    cmd = [cursor_enhanced_path, main_py, "--enable-openclaw", "-p", message]
-                else:
-                    return "Error: Could not find cursor-enhanced. Please check installation."
-            else:
-                cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
+        cursor_enhanced_path = os.environ.get("CURSOR_ENHANCED_BIN")
+        cmd = None
+
+        if cursor_enhanced_path:
+            cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
         else:
-            cmd = ["bash", cursor_enhanced_path, "--enable-openclaw", "-p", message]
+            cursor_enhanced_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
+            if os.path.exists(cursor_enhanced_path):
+                cmd = ["bash", cursor_enhanced_path, "--enable-openclaw", "-p", message]
+            else:
+                import shutil
+                cursor_enhanced_path = shutil.which("cursor-enhanced")
+                if cursor_enhanced_path:
+                    cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
+
+        run_env = None
+        if cmd is None:
+            # Fallback: use python module entrypoint
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}"
+            cmd = ["python3", "-m", "cursor_enhanced", "--enable-openclaw", "-p", message]
+            run_env = env
         
         try:
             logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
@@ -540,7 +545,8 @@ You can also just send me messages and I'll respond using my available tools."""
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=120,
-                cwd=os.path.expanduser("~")
+                cwd=os.path.expanduser("~"),
+                env=run_env
             )
             
             if result.returncode == 0:

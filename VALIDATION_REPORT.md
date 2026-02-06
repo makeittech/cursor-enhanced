@@ -11,6 +11,10 @@
 ## Syntax Validation
 ✅ All files compile without syntax errors
 
+## Testing Status
+- ✅ Unittest scaffolding for core utilities (history, memory)
+- ✅ CI workflow runs syntax checks and tests
+
 ## Bugs Fixed
 
 ### 1. Unused Imports
@@ -67,11 +71,10 @@
 3. **Media Understanding** - Image/audio/video processing
 4. **Channel Integrations** - WhatsApp, Telegram, Slack, Discord, etc.
 5. **Block Streaming** - Streaming response chunks
-6. **Memory Flush** - Automatic memory compaction
-7. **Heartbeat System** - Periodic agent wake-ups
-8. **Queue System** - Message queue management
-9. **Retry Policy** - Automatic retry logic
-10. **Sandbox Support** - Docker-based sandboxing
+6. **Heartbeat System** - Periodic agent wake-ups
+7. **Queue System** - Message queue management
+8. **Retry Policy** - Automatic retry logic
+9. **Sandbox Support** - Docker-based sandboxing
 
 ### Medium Priority
 1. **Full Browser Implementation** - Complete browser automation
