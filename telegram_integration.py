@@ -9,7 +9,7 @@ import os
 import json
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 
 logger = logging.getLogger("cursor_enhanced.telegram")
@@ -17,13 +17,25 @@ logger = logging.getLogger("cursor_enhanced.telegram")
 # Agent timeout configuration (following OpenClaw pattern)
 DEFAULT_AGENT_TIMEOUT_SECONDS = 600  # 10 minutes, matching OpenClaw default
 
-def resolve_agent_timeout_seconds(config_data: Optional[Dict[str, Any]] = None) -> int:
-    """Resolve agent timeout from config, following OpenClaw's resolveAgentTimeoutSeconds pattern"""
+def resolve_agent_timeout_seconds(config_data: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """Resolve agent timeout from config, following OpenClaw's resolveAgentTimeoutSeconds pattern.
+    
+    Returns:
+        int: Timeout in seconds (minimum 1)
+        None: No timeout (unlimited) when timeoutSeconds is 0
+    """
     if config_data:
         agents_defaults = config_data.get("agents", {}).get("defaults", {})
         timeout_raw = agents_defaults.get("timeoutSeconds")
-        if isinstance(timeout_raw, (int, float)) and timeout_raw > 0:
-            return max(1, int(timeout_raw))
+        if timeout_raw is not None:
+            try:
+                timeout_val = int(timeout_raw) if isinstance(timeout_raw, (int, float)) else None
+                if timeout_val == 0:
+                    return None  # 0 means unlimited (no timeout)
+                if timeout_val and timeout_val > 0:
+                    return max(1, timeout_val)
+            except (ValueError, TypeError):
+                pass
     return DEFAULT_AGENT_TIMEOUT_SECONDS
 
 # Try to import telegram bot library
@@ -555,16 +567,21 @@ You can also just send me messages and I'll respond using my available tools."""
             
             # Resolve agent timeout (for subprocess execution), following OpenClaw pattern
             # Use stored config_data or resolve from global function
+            # None means unlimited (no timeout)
             agent_timeout = resolve_agent_timeout_seconds(self.config_data)
-            logger.debug(f"Processing message with agent timeout: {agent_timeout} seconds")
+            if agent_timeout is None:
+                logger.info("Processing message with unlimited timeout (no timeout)")
+            else:
+                logger.debug(f"Processing message with agent timeout: {agent_timeout} seconds")
             
             # Run cursor-enhanced and capture output
+            # timeout=None means no timeout (unlimited processing time)
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=agent_timeout,
+                timeout=agent_timeout,  # None = unlimited, int = timeout in seconds
                 cwd=os.path.expanduser("~"),
                 env=run_env
             )
@@ -584,14 +601,22 @@ You can also just send me messages and I'll respond using my available tools."""
                 return "Sorry, I encountered an error processing your message. Please try again."
         except subprocess.TimeoutExpired:
             agent_timeout = resolve_agent_timeout_seconds(self.config_data)
+            # This should never happen if timeout is None, but handle it gracefully
+            if agent_timeout is None:
+                logger.error("Unexpected timeout with unlimited timeout configured")
+                return "Sorry, an unexpected timeout occurred. Please try again."
             logger.warning(f"Message processing timed out after {agent_timeout} seconds. Message: {message[:100]}")
-            return f"Sorry, the request timed out after {agent_timeout} seconds. This may happen with complex requests. You can increase the timeout via agents.defaults.timeoutSeconds in your configuration, or try breaking your request into smaller parts."
+            return f"Sorry, the request timed out after {agent_timeout} seconds. This may happen with complex requests. You can set agents.defaults.timeoutSeconds to 0 for unlimited timeout, or try breaking your request into smaller parts."
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
 
-def load_telegram_config(config_file: Optional[str] = None) -> Optional[TelegramConfig]:
-    """Load Telegram configuration from config file or environment"""
+def load_telegram_config(config_file: Optional[str] = None) -> Tuple[Optional[TelegramConfig], Optional[Dict[str, Any]]]:
+    """Load Telegram configuration from config file or environment.
+    
+    Returns:
+        Tuple of (TelegramConfig, config_data). config_data is the full config for timeout resolution.
+    """
     if config_file is None:
         config_file = os.path.expanduser("~/.cursor-enhanced-config.json")
     
@@ -612,7 +637,7 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         bot_token = telegram_config.get("botToken")
     
     if not bot_token:
-        return None
+        return None, None
     
     # Telegram API client timeout (for grammY ApiClientOptions, like OpenClaw)
     timeout_seconds_raw = telegram_config.get("timeoutSeconds")
@@ -625,7 +650,7 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         except (ValueError, TypeError):
             logger.warning(f"Invalid timeoutSeconds value: {timeout_seconds_raw}, ignoring")
     
-    return TelegramConfig(
+    telegram_cfg = TelegramConfig(
         bot_token=bot_token,
         enabled=telegram_config.get("enabled", True),
         dm_policy=telegram_config.get("dmPolicy", "pairing"),
@@ -635,6 +660,8 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         webhook_secret=telegram_config.get("webhookSecret"),
         timeout_seconds=timeout_seconds  # Telegram API client timeout (grammY), not agent execution timeout
     )
+    
+    return telegram_cfg, config_data
 
 async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None, config_data: Optional[Dict[str, Any]] = None):
     """Run the Telegram bot"""
