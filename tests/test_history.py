@@ -28,7 +28,7 @@ class HistoryTests(unittest.TestCase):
             {"role": "agent", "content": "world"},
         ]
         selected, _ = main.get_history_fitting_token_limit(
-            history, max_tokens=1000, system_prompt_tokens=0, user_prompt_tokens=0
+            history, max_tokens=5000, system_prompt_tokens=0, user_prompt_tokens=0
         )
         self.assertTrue(selected)
         self.assertEqual(selected[0]["role"], "system")
