@@ -30,6 +30,12 @@
 - ✅ **Presence System** - Basic presence and typing indicators
 - ✅ **Workspace Management** - Skills and memory workspace support
 
+### Project Hardening
+- ✅ **Packaging** - `pyproject.toml` with CLI entrypoint
+- ✅ **Docs** - Architecture, configuration, memory, integrations, development
+- ✅ **CI** - GitHub Actions workflow for tests + syntax checks
+- ✅ **Tests** - Unittest scaffolding for core utilities
+
 ## ⚠️ Partial Implementations
 
 1. **Memory Search** - Uses simple text search, not vector embeddings

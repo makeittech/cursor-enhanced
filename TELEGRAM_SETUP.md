@@ -123,4 +123,4 @@ For open access, set `dmPolicy: "open"` and `allowFrom: ["*"]` in config.
 
 **Import errors:**
 - Install: `pip install python-telegram-bot`
-- Check Python version (requires 3.8+)
+- Check Python version (requires 3.9+)

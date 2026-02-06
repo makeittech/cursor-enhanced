@@ -71,6 +71,16 @@ async def execute_tool_from_response(
                 if query and len(query) > 2:  # Valid query
                     search_queries.append(query)
     
+    # Extract memory search queries
+    memory_queries = []
+    for pattern in tool_patterns.get('memory_search', []):
+        matches = re.finditer(pattern, agent_response, re.IGNORECASE)
+        for match in matches:
+            if match.groups():
+                query = clean_query(match.group(1))
+                if query and len(query) > 2:
+                    memory_queries.append(query)
+
     # Also look for phrases like "funny cat videos", "search for X", etc.
     # Pattern: "search(ing)? (the web )?for [phrase]"
     additional_patterns = [
@@ -131,5 +141,38 @@ async def execute_tool_from_response(
             logger.error(f"Failed to execute web_search for {query}: {e}", exc_info=True)
             tool_results.append({"tool": "web_search", "query": query, "error": str(e)})
             updated_response += f"\n\n[Tool Error: web_search for '{query}']\nError: {str(e)}"
+
+    # Execute memory_search if queries found
+    for query in memory_queries[:2]:
+        try:
+            logger.info(f"Executing memory_search for query: {query}")
+            result = await openclaw_integration.tool_registry.execute("memory_search", "", {"query": query})
+            tool_results.append({"tool": "memory_search", "query": query, "result": result})
+            if result and "error" not in result:
+                entries = result.get("results") or []
+                if entries:
+                    lines = []
+                    for entry in entries[:3]:
+                        path = entry.get("path", "unknown")
+                        start = entry.get("startLine")
+                        end = entry.get("endLine")
+                        line_range = ""
+                        if isinstance(start, int) and isinstance(end, int):
+                            line_range = f"#L{start}-L{end}"
+                        snippet = entry.get("snippet") or entry.get("text", "")
+                        lines.append(f"- {path}{line_range}: {snippet}")
+                    updated_response += (
+                        f"\n\n[Tool Result: memory_search for '{query}']\n" +
+                        "\n".join(lines)
+                    )
+                else:
+                    updated_response += f"\n\n[Tool Result: memory_search for '{query}']\nNo results found."
+            else:
+                error_msg = result.get("error", "Unknown error") if result else "Unknown error"
+                updated_response += f"\n\n[Tool Error: memory_search for '{query}']\n{error_msg}"
+        except Exception as e:
+            logger.error(f"Failed to execute memory_search for {query}: {e}", exc_info=True)
+            tool_results.append({"tool": "memory_search", "query": query, "error": str(e)})
+            updated_response += f"\n\n[Tool Error: memory_search for '{query}']\nError: {str(e)}"
     
     return updated_response, tool_results

@@ -1,6 +1,7 @@
 # Cursor Enhanced
 
-A wrapper for `cursor-agent` that provides enhanced functionality such as persistent conversation history, context management, auto-summarization, and configurable system prompts.
+A production-ready wrapper for `cursor-agent` with persistent history, context
+management, OpenClaw-style tooling, and configurable system prompts.
 
 ## Features
 
@@ -14,15 +15,24 @@ A wrapper for `cursor-agent` that provides enhanced functionality such as persis
 
 ## Installation
 
-1. Clone this repository:
-   ```bash
-   git clone git@github.com:makeittech/cursor-enhanced.git
-   ```
+Requirements:
 
-2. Add the `bin` directory to your PATH or create a symlink:
-   ```bash
-   ln -s /path/to/cursor-enhanced/bin/cursor-enhanced ~/.local/bin/cursor-enhanced
-   ```
+- Python 3.9+
+
+### From source
+
+```bash
+git clone git@github.com:makeittech/cursor-enhanced.git
+cd cursor-enhanced
+pip install -r requirements.txt
+pip install -e .
+```
+
+### CLI entrypoint
+
+```bash
+./bin/cursor-enhanced -p "Hello world"
+```
 
 ## Usage
 
@@ -82,3 +92,11 @@ All interactions are logged to `~/.cursor-enhanced/logs/cursor-enhanced.log` wit
 - Maximum log file size: 5MB
 - Number of backup files: 5
 - Logs include timestamps, user requests, agent responses, and summarization events
+
+## Documentation
+
+- `docs/ARCHITECTURE.md` — module layout and flow
+- `docs/CONFIGURATION.md` — config options
+- `docs/MEMORY.md` — memory workflow
+- `docs/DEVELOPMENT.md` — local dev and testing
+- `docs/INTEGRATIONS.md` — MCP + Telegram

@@ -835,6 +835,21 @@ class MemoryTool:
         self.workspace_dir = workspace_dir or os.path.expanduser("~/.cursor-enhanced/workspace")
         self.memory_dir = os.path.join(self.workspace_dir, "memory")
         os.makedirs(self.memory_dir, exist_ok=True)
+
+    def _find_snippet(self, content: str, query: str, context_lines: int = 2) -> Optional[Dict[str, Any]]:
+        query_lower = query.lower()
+        lines = content.splitlines()
+        for idx, line in enumerate(lines):
+            if query_lower in line.lower():
+                start = max(0, idx - context_lines)
+                end = min(len(lines), idx + context_lines + 1)
+                snippet = "\n".join(lines[start:end])
+                return {
+                    "snippet": snippet,
+                    "startLine": start + 1,
+                    "endLine": end,
+                }
+        return None
     
     async def search(self, query: str, max_results: Optional[int] = None,
                    min_score: Optional[float] = None) -> Dict[str, Any]:
@@ -847,11 +862,16 @@ class MemoryTool:
             with open(memory_file, 'r', encoding='utf-8') as f:
                 content = f.read()
                 if query.lower() in content.lower():
-                    results.append({
+                    snippet_info = self._find_snippet(content, query)
+                    text = (snippet_info or {}).get("snippet") or content[:500]
+                    result = {
                         "path": "MEMORY.md",
-                        "text": content[:500],
+                        "text": text,
                         "score": 0.8
-                    })
+                    }
+                    if snippet_info:
+                        result.update(snippet_info)
+                    results.append(result)
         
         # Search memory/*.md files
         if os.path.exists(self.memory_dir):
@@ -862,11 +882,16 @@ class MemoryTool:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read()
                             if query.lower() in content.lower():
-                                results.append({
+                                snippet_info = self._find_snippet(content, query)
+                                text = (snippet_info or {}).get("snippet") or content[:500]
+                                result = {
                                     "path": f"memory/{file}",
-                                    "text": content[:500],
+                                    "text": text,
                                     "score": 0.7
-                                })
+                                }
+                                if snippet_info:
+                                    result.update(snippet_info)
+                                results.append(result)
                     except:
                         pass
         

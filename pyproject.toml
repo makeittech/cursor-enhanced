@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursor-enhanced"
+version = "0.2.0"
+description = "Cursor agent wrapper with persistent history and OpenClaw-style tooling."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+authors = [{name = "MakeItTech"}]
+keywords = ["cursor", "agent", "openclaw", "assistant"]
+dependencies = [
+  "websockets>=12.0",
+  "httpx>=0.24.0",
+  "pyyaml>=6.0",
+  "python-telegram-bot>=20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/makeittech/cursor-enhanced"
+Issues = "https://github.com/makeittech/cursor-enhanced/issues"
+
+[project.scripts]
+cursor-enhanced = "cursor_enhanced.cli:main"
+
+[tool.setuptools]
+packages = ["cursor_enhanced"]
+py-modules = [
+  "main",
+  "mcp_tools",
+  "openclaw_core",
+  "openclaw_integration",
+  "openclaw_session_tools",
+  "openclaw_web_tools",
+  "telegram_integration",
+  "tool_executor",
+]
+include-package-data = true

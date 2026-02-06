@@ -8,7 +8,9 @@ while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symli
 done
 DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 
-# main.py is one level up from bin/
-PYTHON_SCRIPT="$DIR/../main.py"
+# Use package entrypoint for local development
+PROJECT_ROOT="$DIR/.."
+PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH}"
+export PYTHONPATH
 
-python3 "$PYTHON_SCRIPT" "$@"
+python3 -m cursor_enhanced "$@"
