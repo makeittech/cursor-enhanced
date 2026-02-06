@@ -8,6 +8,10 @@ management, OpenClaw-style tooling, and configurable system prompts.
 - **Persistent History**: Remembers your conversation across sessions, stored in `~/.cursor-enhanced-history.json` (or per-chat files).
 - **Smart Context Management**: Automatically selects conversation history that fits within token limits (~100k tokens default) using intelligent token-based selection.
 - **Auto-Summarization**: Automatically compresses old conversation history when it exceeds token limits, preserving recent messages and creating a summary of older ones.
+- **Memory Flush**: OpenClaw-style pre-compaction memory flush to store durable notes in `MEMORY.md` and daily logs.
+- **Tooling**: OpenClaw tool registry with memory search, web fetch, and session tools.
+- **MCP Discovery**: Discovers MCP tools from Cursor's MCP configuration.
+- **Telegram Bot**: Optional Telegram integration with pairing-based access control.
 - **Multiple Chats**: Support for separate chat sessions using `--chat <name>`, each with its own history file.
 - **System Prompts**: Configurable system prompts via `~/.cursor-enhanced-config.json` or `--system-prompt` flag.
 - **History Management**: View past conversations with `--view-history` and clear history with `--clear-history`.
@@ -34,6 +38,41 @@ pip install -e .
 ./bin/cursor-enhanced -p "Hello world"
 ```
 
+### Telegram bot (optional)
+
+Install dependencies and export your bot token:
+
+```bash
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN="your_bot_token_here"
+```
+
+Run the bot:
+
+```bash
+cursor-enhanced --telegram
+```
+
+Pair a user after receiving a code from `/start`:
+
+```bash
+cursor-enhanced --telegram-approve YOUR_CODE
+```
+
+Alternatively, configure the token in `~/.cursor-enhanced-config.json`:
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "your_bot_token_here",
+      "dmPolicy": "pairing"
+    }
+  }
+}
+```
+
 ## Usage
 
 Use `cursor-enhanced` exactly like you would use `cursor-agent`, but with extra powers.
@@ -56,6 +95,9 @@ cursor-enhanced --chat project-alpha --clear-history
 
 # Use a specific system prompt
 cursor-enhanced --system-prompt coder -p "Review this code"
+
+# Start Telegram bot
+cursor-enhanced --telegram
 ```
 
 ## Configuration
