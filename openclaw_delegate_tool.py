@@ -6,6 +6,7 @@ Runs cursor-agent in a subprocess with the persona's system prompt and the task;
 returns the sub-agent's response. No gateway required.
 """
 
+import json
 import os
 import subprocess
 import asyncio
@@ -14,6 +15,25 @@ from dataclasses import dataclass, asdict
 import logging
 
 logger = logging.getLogger("cursor_enhanced.openclaw_delegate")
+
+
+def _ha_token_from_mcp_config(mcp_config_path: Optional[str]) -> Optional[str]:
+    """Read Home Assistant access token from MCP config file (HOME_ASSISTANT_ACCESS_TOKEN)."""
+    if not mcp_config_path:
+        return None
+    path = os.path.expanduser(str(mcp_config_path))
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        servers = data.get("mcpServers") or data.get("mcp_servers") or {}
+        ha = servers.get("home-assistant") or servers.get("home_assistant") or {}
+        env = ha.get("env") or {}
+        return env.get("HOME_ASSISTANT_ACCESS_TOKEN") or env.get("HOME_ASSISTANT_TOKEN")
+    except Exception:
+        return None
+
 
 # Default personas (id -> persona dict)
 DEFAULT_PERSONAS: List[Dict[str, Any]] = [
@@ -50,6 +70,21 @@ DEFAULT_PERSONAS: List[Dict[str, Any]] = [
         "system_prompt": (
             "You are a clear technical writer. Explain concepts in plain language, use structure (headers, lists), "
             "and avoid jargon unless necessary. Keep answers focused and readable."
+        ),
+        "model": None,
+    },
+    {
+        "id": "home_assistant",
+        "name": "Home Assistant",
+        "system_prompt": (
+            "Home Assistant specialist. Use MCP to list/control entities, call services, check states; suggest automations. "
+            "Be concise and precise with entity IDs and service names.\n\n"
+            "Adding automations: (1) SSH to host 'homeassistant' (Proxmox VM 100). "
+            "(2) Edit /mnt/data/supervisor/homeassistant/automations.yaml and append new automation(s) as YAML list items "
+            "(each - alias: ... with trigger/condition/action). (3) Reload: automation.reload (Bearer token from "
+            "HOME_ASSISTANT_TOKEN).\n\n"
+            "After adding or changing scripts/automations: verify via MCP (e.g. get state or list the entity) and report "
+            "clearly: \"Success: <entity_id> available\" or \"Failed: <entity_id> not found\"."
         ),
         "model": None,
     },
@@ -133,12 +168,30 @@ class DelegateTool:
                 "response": None,
                 "personas": self.list_personas(),
             }
-        timeout = max(60, int(timeout_seconds or 120))
+        default_timeout = (self.config.get("delegate") or {}).get("timeout_seconds", 3600)
+        timeout = max(60, int(timeout_seconds or default_timeout))
         use_model = model or persona.model
         prompt = f"System: {persona.system_prompt}\n\nTask: {task.strip()}"
         cmd = ["bash", self._cursor_agent_path, "--force", "-p", prompt]
         if use_model:
             cmd = ["bash", self._cursor_agent_path, "--force", "--model", use_model, "-p", prompt]
+        env = os.environ.copy()
+        mcp_by_persona = (self.config.get("delegate") or {}).get("mcp_config_by_persona") or {}
+        mcp_config_path = mcp_by_persona.get(persona_id)
+        if mcp_config_path:
+            path = os.path.expanduser(str(mcp_config_path))
+            if os.path.isfile(path):
+                env["CURSOR_MCP_CONFIG_PATH"] = path
+        if persona_id == "home_assistant":
+            delegate_cfg = self.config.get("delegate") or {}
+            mcp_path = mcp_config_path or self.config.get("mcp_config_path")
+            ha_token = (
+                delegate_cfg.get("home_assistant_token")
+                or os.environ.get("HOME_ASSISTANT_TOKEN")
+                or _ha_token_from_mcp_config(mcp_path)
+            )
+            if ha_token:
+                env["HOME_ASSISTANT_TOKEN"] = ha_token
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -148,12 +201,16 @@ class DelegateTool:
                     text=True,
                     timeout=timeout,
                     cwd=os.path.expanduser("~"),
+                    env=env,
                 ),
             )
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
-                "error": f"Sub-agent timed out after {timeout}s",
+                "error": (
+                    f"Sub-agent timed out after {timeout}s. No response was returned. "
+                    "For long tasks (e.g. HA analysis) increase delegate.timeout_seconds in config or request a shorter task."
+                ),
                 "response": None,
                 "persona_id": persona_id,
             }

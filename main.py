@@ -6,7 +6,7 @@ import time
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import asyncio
 import re
 from typing import Optional, Dict, Any, Tuple, List
@@ -47,6 +47,52 @@ DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT = (
     "Pre-compaction memory flush turn. The session is near auto-compaction; "
     "capture durable memories to disk with role separation (User vs Agent). "
     f"If no user-visible reply is needed, start with {MEMORY_FLUSH_NO_REPLY}."
+)
+
+# Smart delegation instructions (appended to system prompt when smart_delegate tool is available)
+SMART_DELEGATE_SYSTEM_PROMPT = (
+    "\n\n=== Smart Delegation (core skill) ===\n"
+    "You have the ability to delegate complex tasks to a more powerful AI model with a cleaner context.\n"
+    "When a task is complex (architecture, deep analysis, multi-step implementation, security review, "
+    "large refactoring, production debugging, etc.), you SHOULD delegate it:\n\n"
+    "To delegate, write in your response: 'smart delegate: <clean task description>'\n"
+    "The system will:\n"
+    "1. Analyze task complexity and score it\n"
+    "2. Discover all available models and their capabilities\n"
+    "3. Select the optimal model for the task's complexity level\n"
+    "4. Announce the choice and reasoning to the user (so they understand what model is used and why)\n"
+    "5. Send ONLY the task (clean context, no conversation history noise) to the chosen model\n"
+    "6. Return the delegate's response\n\n"
+    "Model tiers (auto-selected based on complexity):\n"
+    "- XHIGH (deep reasoning): opus-thinking, gpt-5.x-codex-xhigh — for architecture, complex analysis\n"
+    "- HIGH (strong): opus, gpt-5.x-codex-high — for complex code, thorough review\n"
+    "- MID (balanced): sonnet-thinking, gpt-5.x-codex — moderate complexity\n"
+    "- LOW/FAST: simpler models for quick tasks\n\n"
+    "IMPORTANT: Always announce to the user what you're delegating and why. "
+    "The user should see the model choice and reasoning. This transparency is a core feature.\n"
+    "Example: 'This requires deep architecture analysis. smart delegate: Design a microservices "
+    "architecture for the payment system with the following requirements...'\n"
+)
+
+# Appended to system prompt when running from Telegram (remind/plan/schedule)
+TELEGRAM_SYSTEM_PROMPT_REACH = (
+    "\n\n=== When the user asks to remind, plan, or reach them at a set time ===\n"
+    "Use the reach-at-time feature so they get a notification (e.g. Telegram) at the requested time.\n"
+    "- In N minutes (one-shot): run: cursor-enhanced --reach-add --reach-in-minutes N --reach-message \"Your message\"\n"
+    "- Daily at a fixed time (e.g. 09:00): run: cursor-enhanced --reach-add --reach-time 09:00 --reach-message \"Your message\"\n"
+    "- Custom cron (e.g. weekdays 20:00): run: cursor-enhanced --reach-add --reach-cron \"0 20 * * 1-5\" --reach-message \"Your message\"\n"
+    "Default timezone for daily/cron is Europe/Kyiv (or set reach_timezone in config). Use --reach-timezone TZ to override.\n"
+    "- List schedules: cursor-enhanced --reach-list\n"
+    "- Remove a schedule: cursor-enhanced --reach-remove <id>\n"
+    "Reach fires via cron every minute; the user must have cron set to run: cursor-enhanced --reach-fire every minute.\n"
+)
+
+# Appended to system prompt when running from Telegram (project self-improvement)
+TELEGRAM_SYSTEM_PROMPT_PROJECT = (
+    "\n\n=== cursor-enhanced project (you work from ~/cursor-enhanced) ===\n"
+    "When improving this project: update code → run tests (from project root) → reload the service. "
+    "Commit when the scope is done; push only after user confirms. "
+    "Full workflow: .cursor/rules/cursor-enhanced-workflow.mdc — follow it so you don't forget.\n"
 )
 
 # Logging configuration
@@ -114,6 +160,19 @@ def load_config():
         except json.JSONDecodeError:
             return {}
     return {}
+
+def _env_for_cursor_agent() -> Dict[str, str]:
+    """Build env for cursor-agent subprocess so main agent can use MCP (e.g. Home Assistant)."""
+    env = os.environ.copy()
+    config = load_config()
+    path = config.get("mcp_config_path") or config.get("main_agent_mcp_config_path")
+    if path:
+        expanded = os.path.expanduser(str(path))
+        if os.path.isfile(expanded):
+            env["CURSOR_MCP_CONFIG_PATH"] = expanded
+        else:
+            env["CURSOR_MCP_CONFIG_PATH"] = expanded  # cursor-agent may still use it
+    return env
 
 def load_history(filepath):
     if os.path.exists(filepath):
@@ -404,7 +463,8 @@ def run_memory_flush(history: List[Dict[str, Any]], cursor_flags: List[str],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=180
+            timeout=180,
+            env=_env_for_cursor_agent(),
         )
         if result.returncode != 0:
             logger.warning(f"Memory flush failed: {result.stderr.strip()}")
@@ -485,7 +545,8 @@ def summarize_history(history, cursor_flags) -> Tuple[List[Dict[str, Any]], bool
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=180 # Increased timeout for better summarization
+            timeout=180,  # Increased timeout for better summarization
+            env=_env_for_cursor_agent(),
         )
         
         if result.returncode == 0:
@@ -552,12 +613,175 @@ def main():
     parser.add_argument("--telegram-list-pending", action="store_true", help="List pending Telegram pairing codes")
     parser.add_argument("--telegram-list-paired", action="store_true", help="List paired Telegram users")
     parser.add_argument("--telegram-debug", action="store_true", help="Show debug info about Telegram pairings")
+    # Reach-at-time: schedule notifications (e.g. Telegram) at set times; use cron to run reach-fire every minute
+    parser.add_argument("--reach-fire", action="store_true", help="Run due reach schedules (for cron)")
+    parser.add_argument("--reach-list", action="store_true", help="List reach schedules")
+    parser.add_argument("--reach-add", action="store_true", help="Add a reach schedule")
+    parser.add_argument("--reach-time", type=str, metavar="HH:MM", help="Daily time for reach (e.g. 09:00)")
+    parser.add_argument("--reach-cron", type=str, metavar="CRON", help="Cron expression (e.g. '0 9 * * 1-5')")
+    parser.add_argument("--reach-message", type=str, metavar="TEXT", help="Message to send when reach fires")
+    parser.add_argument("--reach-remove", type=str, metavar="ID", help="Remove reach schedule by id")
+    parser.add_argument("--reach-timezone", type=str, metavar="TZ", help="Timezone for daily/cron (e.g. Europe/London); default Europe/Kyiv from config")
+    parser.add_argument("--reach-in-minutes", type=int, metavar="N", help="One-shot: fire once in N minutes (UTC)")
+    parser.add_argument("--reach-once-at", type=str, metavar="ISO", help="One-shot at ISO datetime (e.g. with Z for UTC)")
+    # Scheduled notifications (in-process when Telegram bot runs; same store as scheduler loop)
+    parser.add_argument("--schedule-add", action="store_true", help="Add a scheduled Telegram notification")
+    parser.add_argument("--schedule-list", action="store_true", help="List scheduled notifications")
+    parser.add_argument("--schedule-remove", type=str, metavar="ID", help="Remove a scheduled notification by ID")
+    parser.add_argument("--schedule-time", type=str, metavar="TIME", help="For add: HH:MM (daily) or ISO datetime (with --schedule-once)")
+    parser.add_argument("--schedule-message", type=str, metavar="TEXT", help="Message to send")
+    parser.add_argument("--schedule-once", action="store_true", help="One-shot at given time (use with --schedule-time)")
+    parser.add_argument("--schedule-user", type=str, metavar="CHAT_ID", help="Telegram chat ID (default: all paired)")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
 
     if args.version:
         print(APP_VERSION)
+        return
+
+    # Handle reach-at-time commands (schedules to reach user at set times via Telegram/cron)
+    if args.reach_fire:
+        try:
+            from reach_schedules import fire_due_schedules
+            fired = fire_due_schedules()
+            if fired:
+                for s in fired:
+                    print(f"Reach fired: {s.get('id')} -> {s.get('message', '')[:50]}...")
+            # Exit 0 so cron doesn't flag errors when nothing was due
+        except Exception as e:
+            logger.error("reach-fire failed: %s", e)
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.reach_list:
+        try:
+            from reach_schedules import list_schedules
+            schedules = list_schedules()
+            if not schedules:
+                print("No reach schedules. Add with: cursor-enhanced --reach-add --reach-time 09:00 --reach-message 'Your message'")
+                return
+            print("Reach schedules (use --reach-fire from cron every minute):")
+            for s in schedules:
+                spec = s.get("time") or s.get("cron") or s.get("once_at") or "?"
+                tz = s.get("timezone") or ""
+                tz_str = f"  tz={tz}" if tz else ""
+                enabled = "enabled" if s.get("enabled", True) else "disabled"
+                print(f"  {s.get('id')}  {spec}{tz_str}  {enabled}  {s.get('channel', 'telegram')}  {s.get('message', '')[:60]}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.reach_add:
+        try:
+            from reach_schedules import add_schedule
+            once_at = None
+            if getattr(args, "reach_in_minutes", None) is not None:
+                n = args.reach_in_minutes
+                if n < 0:
+                    raise ValueError("--reach-in-minutes must be >= 0")
+                once_at = (datetime.now(timezone.utc) + timedelta(minutes=n)).isoformat()
+                entry = add_schedule(once_at=once_at, message=args.reach_message or "", channel="telegram")
+            elif getattr(args, "reach_once_at", None):
+                once_at = args.reach_once_at.strip()
+                entry = add_schedule(once_at=once_at, message=args.reach_message or "", channel="telegram")
+            else:
+                default_tz = load_config().get("reach_timezone", "Europe/Kyiv")
+                entry = add_schedule(
+                    time=args.reach_time,
+                    cron=args.reach_cron,
+                    message=args.reach_message or "",
+                    channel="telegram",
+                    timezone_name=getattr(args, "reach_timezone", None) or default_tz,
+                )
+            spec = entry.get("time") or entry.get("cron") or entry.get("once_at") or "?"
+            print(f"Added: {entry['id']}  {spec}  {entry['message'][:50]}...")
+            print("Add to crontab to run every minute: * * * * * cursor-enhanced --reach-fire")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.reach_remove:
+        try:
+            from reach_schedules import remove_schedule
+            if remove_schedule(args.reach_remove):
+                print(f"Removed schedule {args.reach_remove}")
+            else:
+                print(f"Schedule not found: {args.reach_remove}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Scheduled notifications (in-process scheduler when --telegram runs)
+    if args.schedule_list:
+        try:
+            from telegram_integration import schedule_list, SCHEDULE_STORE_PATH
+            entries = schedule_list(SCHEDULE_STORE_PATH)
+            if not entries:
+                print("No scheduled notifications. Add with: cursor-enhanced --schedule-add --schedule-time 09:00 --schedule-message 'Your message'")
+                return
+            print("Scheduled notifications (fire when Telegram bot is running):")
+            for e in entries:
+                st = e.get("schedule_type") or "?"
+                spec = (e.get("time") or e.get("once_at") or "?")
+                en = "enabled" if e.get("enabled", True) else "disabled"
+                msg = (e.get("message") or "")[:50]
+                print(f"  {e.get('id')}  {st}  {spec}  {en}  {msg}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.schedule_remove:
+        try:
+            from telegram_integration import schedule_remove, SCHEDULE_STORE_PATH
+            if schedule_remove(args.schedule_remove, SCHEDULE_STORE_PATH):
+                print(f"Removed scheduled notification {args.schedule_remove}")
+            else:
+                print(f"Schedule not found: {args.schedule_remove}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.schedule_add:
+        try:
+            from telegram_integration import schedule_add, SCHEDULE_STORE_PATH
+            time_spec = (args.schedule_time or "").strip()
+            message = (args.schedule_message or "").strip()
+            if not time_spec or not message:
+                print("Error: --schedule-time and --schedule-message are required", file=sys.stderr)
+                sys.exit(1)
+            chat_id = "all"
+            if args.schedule_user is not None:
+                try:
+                    chat_id = int(args.schedule_user)
+                except ValueError:
+                    chat_id = args.schedule_user
+            if args.schedule_once:
+                # ISO datetime (support with or without T/Z)
+                schedule_type = "once"
+                if "T" not in time_spec and " " in time_spec:
+                    time_spec = time_spec.replace(" ", "T", 1)
+                if time_spec and time_spec[-1] not in "Zz+-" and len(time_spec) <= 19:
+                    time_spec = time_spec + "Z"
+            else:
+                schedule_type = "daily"
+            uid = schedule_add(schedule_type=schedule_type, message=message, time_spec=time_spec, telegram_chat_id=chat_id)
+            print(f"Added: {uid}  {schedule_type}  {time_spec}  {message[:40]}...")
+            print("Notifications fire when the Telegram bot is running: cursor-enhanced --telegram")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         return
     
     # Handle Telegram-specific commands
@@ -832,7 +1056,10 @@ def main():
     if not user_prompt:
         # Use direct path for compatibility
         cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
-        subprocess.run(["bash", cursor_agent_path] + unknown_args)
+        subprocess.run(
+            ["bash", cursor_agent_path] + unknown_args,
+            env=_env_for_cursor_agent(),
+        )
         return
 
     # Log user prompt
@@ -951,6 +1178,19 @@ def main():
     full_prompt_parts = []
     if system_prompt_content:
         full_prompt_parts.append(f"System: {system_prompt_content}\n")
+    if os.environ.get("CURSOR_ENHANCED_CHANNEL") == "telegram":
+        full_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_REACH + "\n")
+        full_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_PROJECT + "\n")
+        # Smart delegation is especially important for Telegram: announce model choices to the user
+        full_prompt_parts.append(
+            "\n=== Telegram: Smart Delegation ===\n"
+            "When delegating complex tasks via smart delegate, ALWAYS announce the model choice "
+            "and reasoning in the response. The user on Telegram should clearly see:\n"
+            "- What task is being delegated\n"
+            "- Which model was selected and why\n"
+            "- The complexity assessment\n"
+            "This transparency is a core cursor-enhanced feature.\n"
+        )
     
     # Add OpenClaw tools information to system prompt
     if openclaw and args.enable_openclaw:
@@ -986,6 +1226,10 @@ def main():
             full_prompt_parts.append("To use a tool, describe what you want to do in your response. The system will automatically detect and execute tools based on your description.\n")
             full_prompt_parts.append("For example, if you want to fetch a webpage, say: 'I'll fetch the webpage at [URL]' or 'Let me search the web for [query]'.\n")
             full_prompt_parts.append("The system will execute the appropriate tool and provide you with the results.\n\n")
+        
+        # Add smart delegation instructions if the tool is available
+        if "smart_delegate" in (openclaw.tool_registry.tools if hasattr(openclaw.tool_registry, 'tools') else {}):
+            full_prompt_parts.append(SMART_DELEGATE_SYSTEM_PROMPT)
     
     full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
@@ -997,17 +1241,19 @@ def main():
     cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
     cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
     
-    # Run and capture output
+    # Run and capture output (env includes MCP config so main agent can use e.g. Home Assistant)
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1, 
-        universal_newlines=True
+        bufsize=1,
+        universal_newlines=True,
+        env=_env_for_cursor_agent(),
     )
     
     agent_response = ""
+    agent_stderr = ""
     
     # Stream stdout
     if process.stdout:
@@ -1019,6 +1265,7 @@ def main():
     if process.stderr:
         for line in process.stderr:
             print(line, end="", file=sys.stderr)
+            agent_stderr += line
             
     process.wait()
     
@@ -1027,7 +1274,7 @@ def main():
         try:
             from tool_executor import execute_tool_from_response
             updated_response, tool_results = asyncio.run(
-                execute_tool_from_response(agent_response, openclaw)
+                execute_tool_from_response(agent_response, openclaw, last_user_message=user_prompt)
             )
             if tool_results:
                 logger.info(f"Executed {len(tool_results)} tools from agent response")
@@ -1059,12 +1306,24 @@ def main():
         logger.info(f"Agent Response: {agent_response.strip()}")
     else:
         logger.error(f"Agent execution failed with return code {process.returncode}")
+        # Print error info to stdout so callers (e.g. Telegram subprocess) can relay it
+        stderr_text = agent_stderr.strip()
+        if agent_response.strip():
+            # Agent produced partial output before failing - already printed via streaming
+            error_msg = f"\n\n[Error: agent exited with code {process.returncode}]"
+        elif stderr_text:
+            error_msg = f"Sorry, I encountered an error processing your request: {stderr_text[:500]}"
+        else:
+            error_msg = f"Sorry, the agent encountered an error (exit code {process.returncode}). Please try again."
+        print(error_msg)
+        logger.error(f"Agent stderr: {stderr_text[:500]}")
         # Update presence on error
         if openclaw and session_entry:
             try:
                 openclaw.presence_manager.set_typing(session_entry.session_key, False)
             except:
                 pass
+        sys.exit(process.returncode)
 
 if __name__ == "__main__":
     main()

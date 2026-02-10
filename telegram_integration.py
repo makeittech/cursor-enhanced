@@ -9,26 +9,321 @@ import os
 import json
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 
 logger = logging.getLogger("cursor_enhanced.telegram")
 
+# Scheduled notifications store path
+SCHEDULE_STORE_PATH = os.path.expanduser("~/.cursor-enhanced/scheduled-notifications.json")
+DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS = 90
+
 # Try to import telegram bot library
 try:
-    from telegram import Update, Bot
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+    from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
     TELEGRAM_AVAILABLE = True
 except ImportError as e:
     TELEGRAM_AVAILABLE = False
     Update = None
     Bot = None
+    InlineKeyboardButton = None
+    InlineKeyboardMarkup = None
     Application = None
     CommandHandler = None
     MessageHandler = None
+    CallbackQueryHandler = None
     filters = None
     ContextTypes = None
     logger.warning(f"python-telegram-bot not available: {e}. Install with: pip install python-telegram-bot")
+
+
+# --- Scheduled notifications (cron-like) ---
+
+def _load_schedule_store(path: str = SCHEDULE_STORE_PATH) -> List[Dict[str, Any]]:
+    """Load schedule store; return list of notification entries."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        entries = data.get("notifications") if isinstance(data, dict) else data
+        return list(entries) if isinstance(entries, list) else []
+    except Exception as e:
+        logger.warning(f"Failed to load schedule store {path}: {e}")
+        return []
+
+
+def _save_schedule_store(entries: List[Dict[str, Any]], path: str = SCHEDULE_STORE_PATH) -> None:
+    """Save schedule store (atomic write)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"notifications": entries}, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.error(f"Failed to save schedule store {path}: {e}")
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def schedule_add(
+    schedule_type: str,
+    message: str,
+    time_spec: str,
+    telegram_chat_id: Union[int, str] = "all",
+    timezone_name: Optional[str] = None,
+    path: str = SCHEDULE_STORE_PATH,
+) -> str:
+    """Add a scheduled notification. schedule_type: 'daily' | 'once'. time_spec: 'HH:MM' or ISO datetime. Returns id."""
+    uid = str(uuid.uuid4())
+    entry: Dict[str, Any] = {
+        "id": uid,
+        "schedule_type": schedule_type,
+        "message": message,
+        "telegram_chat_id": telegram_chat_id,
+        "enabled": True,
+    }
+    if timezone_name:
+        entry["timezone"] = timezone_name
+    if schedule_type == "daily":
+        entry["time"] = time_spec  # HH:MM
+        entry["last_run"] = None
+        entry["next_run"] = None
+    else:
+        entry["once_at"] = time_spec  # ISO datetime string
+    entries = _load_schedule_store(path)
+    entries.append(entry)
+    _save_schedule_store(entries, path)
+    logger.info(f"Scheduled notification added: id={uid}, type={schedule_type}, time_spec={time_spec}")
+    return uid
+
+
+def schedule_list(path: str = SCHEDULE_STORE_PATH) -> List[Dict[str, Any]]:
+    """List all scheduled notifications."""
+    return _load_schedule_store(path)
+
+
+def schedule_remove(entry_id: str, path: str = SCHEDULE_STORE_PATH) -> bool:
+    """Remove a scheduled notification by id. Returns True if removed."""
+    entries = _load_schedule_store(path)
+    new_entries = [e for e in entries if e.get("id") != entry_id]
+    if len(new_entries) == len(entries):
+        return False
+    _save_schedule_store(new_entries, path)
+    logger.info(f"Scheduled notification removed: id={entry_id}")
+    return True
+
+
+def schedule_update_enabled(entry_id: str, enabled: bool, path: str = SCHEDULE_STORE_PATH) -> bool:
+    """Enable or disable a scheduled notification by id. Returns True if found and updated."""
+    entries = _load_schedule_store(path)
+    for e in entries:
+        if e.get("id") == entry_id:
+            e["enabled"] = bool(enabled)
+            _save_schedule_store(entries, path)
+            logger.info(f"Scheduled notification updated: id={entry_id}, enabled={enabled}")
+            return True
+    return False
+
+
+def _parse_daily_next_run(entry: Dict[str, Any]) -> Optional[datetime]:
+    """Compute next run time for a daily entry (UTC). Uses entry['time'] HH:MM and optional timezone."""
+    tz = timezone.utc
+    if entry.get("timezone"):
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo(entry["timezone"])
+        except Exception:
+            pass
+    now = datetime.now(tz)
+    time_str = (entry.get("time") or "09:00").strip()
+    parts = time_str.split(":")
+    try:
+        hour = int(parts[0]) if len(parts) > 0 else 9
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+    except (ValueError, TypeError):
+        return None
+    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return next_run.astimezone(timezone.utc)
+
+
+def get_due_notifications(path: str = SCHEDULE_STORE_PATH) -> List[Dict[str, Any]]:
+    """Return list of enabled notifications that are due (next_run <= now or once_at <= now)."""
+    entries = _load_schedule_store(path)
+    now_utc = datetime.now(timezone.utc)
+    due: List[Dict[str, Any]] = []
+    for e in entries:
+        if not e.get("enabled", True):
+            continue
+        if e.get("schedule_type") == "once":
+            once_at_str = e.get("once_at")
+            if not once_at_str:
+                continue
+            try:
+                # Support ISO with or without Z
+                if once_at_str.endswith("Z"):
+                    once_at = datetime.fromisoformat(once_at_str.replace("Z", "+00:00"))
+                else:
+                    once_at = datetime.fromisoformat(once_at_str)
+                if once_at.tzinfo is None:
+                    once_at = once_at.replace(tzinfo=timezone.utc)
+                else:
+                    once_at = once_at.astimezone(timezone.utc)
+                if once_at <= now_utc:
+                    due.append(e)
+            except ValueError:
+                logger.warning(f"Invalid once_at for schedule {e.get('id')}: {once_at_str}")
+        else:
+            # daily: use next_run if set, else compute and persist so we don't fire until then
+            next_run = e.get("next_run")
+            if next_run is None:
+                next_run_dt = _parse_daily_next_run(e)
+                if next_run_dt is None:
+                    continue
+                e["next_run"] = next_run_dt.isoformat()
+                # Persist so this daily is not due until next_run
+                entries_copy = [x if x.get("id") != e.get("id") else dict(e) for x in entries]
+                _save_schedule_store(entries_copy, path)
+                continue
+            try:
+                next_run_dt = datetime.fromisoformat(next_run) if isinstance(next_run, str) else next_run
+                if next_run_dt.tzinfo is None:
+                    next_run_dt = next_run_dt.replace(tzinfo=timezone.utc)
+                else:
+                    next_run_dt = next_run_dt.astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                next_run_dt = _parse_daily_next_run(e)
+                if next_run_dt is None:
+                    continue
+                e["next_run"] = next_run_dt.isoformat()
+            if next_run_dt <= now_utc:
+                due.append(e)
+    return due
+
+
+def _get_chat_ids_for_entry(entry: Dict[str, Any]) -> List[int]:
+    """Resolve telegram_chat_id to list of chat IDs (from pairings if 'all')."""
+    target = entry.get("telegram_chat_id", "all")
+    if target == "all":
+        return _get_paired_chat_ids()
+    try:
+        return [int(target)]
+    except (ValueError, TypeError):
+        return _get_paired_chat_ids()
+
+
+async def send_scheduled_notification_async(
+    entry: Dict[str, Any],
+    config: Optional["TelegramConfig"] = None,
+) -> bool:
+    """Send one scheduled notification. Returns True if at least one send succeeded."""
+    if not TELEGRAM_AVAILABLE or Bot is None:
+        logger.warning("Telegram not available for scheduled notification")
+        return False
+    if config is None:
+        config = load_telegram_config()
+    if not config or not config.bot_token:
+        logger.warning("Telegram not configured for scheduled notification")
+        return False
+    chat_ids = _get_chat_ids_for_entry(entry)
+    if not chat_ids:
+        logger.warning("No chat IDs for scheduled notification id=%s", entry.get("id"))
+        return False
+    bot = Bot(token=config.bot_token)
+    sent = 0
+    for cid in chat_ids:
+        try:
+            await bot.send_message(chat_id=cid, text=entry.get("message", ""))
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Scheduled notification to {cid} failed: {e}")
+    return sent > 0
+
+
+def _mark_notification_sent(entry: Dict[str, Any], path: str = SCHEDULE_STORE_PATH) -> None:
+    """After sending: remove one-shot or update daily next_run."""
+    entries = _load_schedule_store(path)
+    eid = entry.get("id")
+    now_utc = datetime.now(timezone.utc)
+    new_entries = []
+    for e in entries:
+        if e.get("id") != eid:
+            new_entries.append(e)
+            continue
+        if e.get("schedule_type") == "once":
+            # Remove one-shot after send
+            logger.info(f"Scheduled one-shot notification sent and removed: id={eid}")
+            continue
+        # daily: set last_run and next_run
+        e["last_run"] = now_utc.isoformat()
+        next_run = _parse_daily_next_run(e)
+        if next_run:
+            e["next_run"] = next_run.isoformat()
+            new_entries.append(e)
+            logger.info(f"Scheduled daily notification sent; next_run={e['next_run']}: id={eid}")
+    _save_schedule_store(new_entries, path)
+
+
+async def run_scheduler_iteration(config: Optional["TelegramConfig"] = None, path: str = SCHEDULE_STORE_PATH) -> None:
+    """Run one iteration: get due notifications, send each, update store; then fire due reach schedules."""
+    if config is None:
+        config = load_telegram_config()
+    due = get_due_notifications(path)
+    for entry in due:
+        try:
+            ok = await send_scheduled_notification_async(entry, config)
+            if ok:
+                _mark_notification_sent(entry, path)
+            else:
+                logger.warning("Scheduled notification send failed; will retry next interval: id=%s", entry.get("id"))
+        except Exception as e:
+            logger.error(f"Scheduled notification error for id={entry.get('id')}: {e}", exc_info=True)
+    # Fire reach-at-time schedules (e.g. "remind me in 10 min") so they work without cron
+    try:
+        from reach_schedules import fire_due_schedules_async
+        fired = await fire_due_schedules_async()
+        if fired:
+            logger.info("Reach fired %d schedule(s) from in-process scheduler", len(fired))
+    except Exception as e:
+        logger.error("Reach fire (in-process) failed: %s", e, exc_info=True)
+
+
+async def run_scheduler_loop(
+    config: Optional["TelegramConfig"] = None,
+    interval_seconds: int = DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+    path: str = SCHEDULE_STORE_PATH,
+    stop_event: Optional[asyncio.Event] = None,
+) -> None:
+    """Background loop: every interval_seconds, run one scheduler iteration. If stop_event is set, stop when it is set."""
+    if config is None:
+        config = load_telegram_config()
+    while True:
+        try:
+            await run_scheduler_iteration(config, path)
+        except Exception as e:
+            logger.error(f"Scheduler iteration error: {e}", exc_info=True)
+        if stop_event is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=float(interval_seconds))
+            except asyncio.TimeoutError:
+                pass
+            if stop_event.is_set():
+                logger.info("Scheduler loop stopping (stop_event set)")
+                break
+        else:
+            await asyncio.sleep(interval_seconds)
+
 
 @dataclass
 class TelegramConfig:
@@ -40,6 +335,31 @@ class TelegramConfig:
     groups: Optional[Dict[str, Any]] = None  # Group configuration
     webhook_url: Optional[str] = None
     webhook_secret: Optional[str] = None
+    request_timeout_seconds: int = 900  # Max seconds per message (default 15 min; set high to avoid "request timed out")
+
+
+# Default menu items (can be extended via config "telegram_menu" key)
+DEFAULT_MENU_ITEMS: List[Dict[str, Any]] = [
+    {
+        "id": "weather_lviv",
+        "label": "🌤 Weather Lviv",
+        "action": "weather",
+        "city": "Lviv",
+    },
+    {
+        "id": "ha_house_fuse_power",
+        "label": "🔌 House Fuse Power",
+        "action": "delegate",
+        "persona_id": "home_assistant",
+        "task": (
+            "Check the current power usage on the house fuse (main grid input sensor). "
+            "Report: current power (W), today's total energy if available (kWh), "
+            "and a brief note if the value is unusually high or low. "
+            "Use MCP to query the relevant power/energy sensor(s). Be concise."
+        ),
+    },
+]
+
 
 class TelegramBot:
     """Telegram bot for cursor-enhanced"""
@@ -57,6 +377,7 @@ class TelegramBot:
         self.pending_pairings: Dict[str, str] = {}  # chat_id -> pairing_code
         self._pairings_loaded = False
         self._load_pairings(force_reload=True)
+        self.menu_items: List[Dict[str, Any]] = self._load_menu_items()
     
     def _load_pairings(self, force_reload: bool = False):
         """Load paired users and pending pairings from disk"""
@@ -245,6 +566,172 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to save pending pairing: {e}", exc_info=True)
         
+    def _load_menu_items(self) -> List[Dict[str, Any]]:
+        """Load menu items: defaults merged with config overrides from 'telegram_menu'."""
+        items_by_id = {item["id"]: dict(item) for item in DEFAULT_MENU_ITEMS}
+        try:
+            config_file = os.path.expanduser("~/.cursor-enhanced-config.json")
+            if os.path.exists(config_file):
+                with open(config_file, "r") as f:
+                    cfg = json.load(f)
+                for item in cfg.get("telegram_menu", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        items_by_id[item["id"]] = item
+        except Exception as e:
+            logger.warning(f"Failed to load telegram_menu from config: {e}")
+        return list(items_by_id.values())
+
+    def _build_menu_keyboard(self) -> "InlineKeyboardMarkup":
+        """Build inline keyboard from menu items."""
+        buttons = []
+        for item in self.menu_items:
+            buttons.append([InlineKeyboardButton(
+                text=item.get("label", item["id"]),
+                callback_data=f"menu:{item['id']}",
+            )])
+        return InlineKeyboardMarkup(buttons)
+
+    async def _handle_menu(self, update, context):
+        """Handle /menu command — show inline keyboard."""
+        user = update.effective_user
+        chat = update.effective_chat
+        if chat.type == "private" and not self._is_allowed_user(user.id, user.username):
+            await update.message.reply_text("Please pair first. Send /start")
+            return
+        if not self.menu_items:
+            await update.message.reply_text("No menu items configured.")
+            return
+        await update.message.reply_text("Choose an action:", reply_markup=self._build_menu_keyboard())
+
+    async def _handle_callback_query(self, update, context):
+        """Handle inline keyboard button presses."""
+        query = update.callback_query
+        user = update.effective_user
+        chat = update.effective_chat
+        if not query or not query.data:
+            return
+        # Acknowledge the button press immediately
+        await query.answer()
+
+        if chat.type == "private" and not self._is_allowed_user(user.id, user.username):
+            await query.edit_message_text("Please pair first. Send /start")
+            return
+
+        data = query.data  # e.g. "menu:ha_house_fuse_power"
+        if not data.startswith("menu:"):
+            return
+        item_id = data[len("menu:"):]
+        item = next((i for i in self.menu_items if i["id"] == item_id), None)
+        if not item:
+            await query.edit_message_text(f"Unknown menu item: {item_id}")
+            return
+
+        action = item.get("action", "message")
+        label = item.get("label", item_id)
+
+        # Show a "working" indicator
+        await query.edit_message_text(f"⏳ {label}…")
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+        except Exception:
+            pass
+
+        try:
+            if action == "weather":
+                response = await self._run_menu_weather(item)
+            elif action == "delegate":
+                response = await self._run_menu_delegate(item, user.id, chat.id)
+            elif action == "message":
+                # Plain text passthrough to cursor-enhanced
+                response = await self._process_message(item.get("task", label), user.id, chat.id)
+            else:
+                response = f"Unknown action type: {action}"
+        except Exception as e:
+            logger.error(f"Menu action {item_id} failed: {e}", exc_info=True)
+            response = f"Error running {label}: {e}"
+
+        # Send result and re-attach the menu keyboard for quick re-use
+        max_length = 4096
+        keyboard = self._build_menu_keyboard()
+        if len(response) > max_length:
+            chunks = [response[i:i + max_length] for i in range(0, len(response), max_length - 100)]
+            for i, chunk in enumerate(chunks):
+                if i == len(chunks) - 1:
+                    await context.bot.send_message(chat_id=chat.id, text=chunk, reply_markup=keyboard)
+                else:
+                    await context.bot.send_message(chat_id=chat.id, text=chunk)
+        else:
+            await context.bot.send_message(chat_id=chat.id, text=response, reply_markup=keyboard)
+
+    async def _run_menu_weather(self, item: Dict[str, Any]) -> str:
+        """Execute a weather menu item directly via WeatherTool (fast, in-process)."""
+        city = item.get("city", "Lviv")
+        try:
+            from openclaw_weather_tool import WeatherTool
+            tool = WeatherTool()
+            result = await tool.execute(city=city, forecast_days=7)
+            if "error" in result:
+                return f"Weather error: {result['error']}"
+            # Format a nice text response
+            cur = result.get("current", {})
+            city_name = result.get("city", city)
+            lines = [f"🌤 Weather in {city_name}"]
+            lines.append("")
+            lines.append(
+                f"Now: {cur.get('temperature_c', '?')}°C "
+                f"(feels {cur.get('feels_like_c', '?')}°C), "
+                f"{cur.get('weather', '?')}"
+            )
+            lines.append(
+                f"💧 {cur.get('humidity_pct', '?')}%  "
+                f"💨 {cur.get('wind_speed_kmh', '?')} km/h  "
+                f"🔻 {cur.get('pressure_hpa', '?')} hPa"
+            )
+            forecast = result.get("forecast", [])
+            if forecast:
+                lines.append("")
+                lines.append("📅 7-day forecast:")
+                for day in forecast:
+                    t_min = day.get("temp_min_c", "?")
+                    t_max = day.get("temp_max_c", "?")
+                    precip = day.get("precipitation_mm", 0) or 0
+                    precip_str = f", {precip} mm" if precip else ""
+                    lines.append(
+                        f"  {day.get('date', '?')}: {day.get('weather', '?')} "
+                        f"({t_min}…{t_max}°C{precip_str})"
+                    )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error("Weather menu action failed: %s", e, exc_info=True)
+            return f"Weather error: {e}"
+
+    async def _run_menu_delegate(self, item: Dict[str, Any], user_id: int, chat_id: int) -> str:
+        """Execute a menu item via the delegate tool (sub-agent with persona)."""
+        persona_id = item.get("persona_id", "researcher")
+        task = item.get("task", "")
+        if not task:
+            return "Menu item has no task configured."
+
+        # Try using the delegate tool directly if openclaw is available
+        if self.openclaw and hasattr(self.openclaw, "tool_registry"):
+            try:
+                result = await self.openclaw.tool_registry.execute(
+                    "delegate", "", {"persona_id": persona_id, "task": task}
+                )
+                if result.get("success"):
+                    return result.get("response", "(empty response from delegate)")
+                else:
+                    error = result.get("error", "Unknown delegate error")
+                    logger.warning(f"Delegate {persona_id} failed: {error}")
+                    # Fall through to subprocess
+            except Exception as e:
+                logger.warning(f"Delegate via openclaw failed, falling back to subprocess: {e}")
+
+        # Fallback: run via cursor-enhanced subprocess
+        return await self._process_message(
+            f"delegate to {persona_id}: {task}", user_id, chat_id
+        )
+
     async def start(self):
         """Start the Telegram bot"""
         if not self.config.enabled:
@@ -261,6 +748,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("start", self._handle_start))
         self.application.add_handler(CommandHandler("help", self._handle_help))
         self.application.add_handler(CommandHandler("status", self._handle_status))
+        self.application.add_handler(CommandHandler("menu", self._handle_menu))
+        self.application.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         
         # Start polling
@@ -407,6 +896,7 @@ class TelegramBot:
         help_text = """Available commands:
 /start - Start the bot
 /help - Show this help message
+/menu - Quick actions menu
 /status - Show bot status and available tools
 
 You can also just send me messages and I'll respond using my available tools."""
@@ -513,6 +1003,8 @@ You can also just send me messages and I'll respond using my available tools."""
         cursor_enhanced_path = os.environ.get("CURSOR_ENHANCED_BIN")
         cmd = None
 
+        run_env = os.environ.copy()
+        run_env["CURSOR_ENHANCED_CHANNEL"] = "telegram"
         if cursor_enhanced_path:
             cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
         else:
@@ -525,46 +1017,51 @@ You can also just send me messages and I'll respond using my available tools."""
                 if cursor_enhanced_path:
                     cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
 
-        run_env = None
         if cmd is None:
             # Fallback: use python module entrypoint
             script_dir = os.path.dirname(os.path.abspath(__file__))
             repo_root = os.path.dirname(script_dir)
-            env = os.environ.copy()
-            env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}"
+            run_env["PYTHONPATH"] = f"{repo_root}:{run_env.get('PYTHONPATH', '')}"
             cmd = ["python3", "-m", "cursor_enhanced", "--enable-openclaw", "-p", message]
-            run_env = env
         
         try:
             logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
             
             # Run cursor-enhanced and capture output
+            timeout_sec = getattr(self.config, "request_timeout_seconds", 900)
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=120,
+                timeout=timeout_sec,
                 cwd=os.path.expanduser("~"),
                 env=run_env
             )
             
+            stdout_text = (result.stdout or "").strip()
+            stderr_text = (result.stderr or "").strip()
+            
             if result.returncode == 0:
-                response = result.stdout.strip()
-                if not response:
-                    response = "I processed your message but didn't get a response."
+                if stdout_text:
+                    response = stdout_text
+                elif stderr_text:
+                    # Agent succeeded but only wrote to stderr (unusual but possible)
+                    logger.warning(f"cursor-enhanced returned 0 but stdout empty, stderr: {stderr_text[:200]}")
+                    response = stderr_text
+                else:
+                    logger.warning("cursor-enhanced returned 0 with empty stdout and stderr")
+                    response = "I processed your message but got an empty response. Please try again."
                 logger.info(f"Response generated: {len(response)} characters")
                 return response
             else:
-                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-                logger.error(f"cursor-enhanced error (code {result.returncode}): {error_msg}")
-                # Try to extract useful error message
-                if "Error" in error_msg or "error" in error_msg.lower():
-                    return f"Sorry, I encountered an error: {error_msg[:500]}"
-                return "Sorry, I encountered an error processing your message. Please try again."
+                # Non-zero exit: prefer stdout (main.py now prints errors there), fall back to stderr
+                response = stdout_text or stderr_text or f"Sorry, the agent encountered an error (exit code {result.returncode}). Please try again."
+                logger.error(f"cursor-enhanced error (code {result.returncode}): stdout={stdout_text[:200]}, stderr={stderr_text[:200]}")
+                return response[:4000]
         except subprocess.TimeoutExpired:
             logger.warning("Message processing timed out")
-            return "Sorry, the request timed out. Please try again with a simpler question."
+            return "Sorry, the request timed out. You can increase the limit with requestTimeoutSeconds in config or CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT (current limit was %s seconds)." % getattr(self.config, "request_timeout_seconds", 900)
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
@@ -593,6 +1090,19 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
     if not bot_token:
         return None
     
+    timeout_val = 900
+    env_timeout = os.environ.get("CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT")
+    if env_timeout is not None:
+        try:
+            timeout_val = max(60, int(env_timeout))
+        except ValueError:
+            pass
+    elif telegram_config.get("requestTimeoutSeconds") is not None:
+        try:
+            timeout_val = max(60, int(telegram_config["requestTimeoutSeconds"]))
+        except (ValueError, TypeError):
+            pass
+    
     return TelegramConfig(
         bot_token=bot_token,
         enabled=telegram_config.get("enabled", True),
@@ -600,8 +1110,55 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
         allow_from=telegram_config.get("allowFrom"),
         groups=telegram_config.get("groups"),
         webhook_url=telegram_config.get("webhookUrl"),
-        webhook_secret=telegram_config.get("webhookSecret")
+        webhook_secret=telegram_config.get("webhookSecret"),
+        request_timeout_seconds=timeout_val
     )
+
+
+def _get_paired_chat_ids() -> List[int]:
+    """Load paired user/chat IDs from pairing store (for reach notifications)."""
+    path = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        paired = data.get("paired_users") or []
+        return [int(uid) for uid in paired]
+    except Exception as e:
+        logger.warning(f"Failed to load pairings for reach: {e}")
+        return []
+
+
+async def send_to_paired_users_async(message: str, config: Optional[TelegramConfig] = None) -> bool:
+    """Send a message to all paired Telegram users (e.g. for reach-at-time). Returns True if at least one send succeeded."""
+    if not TELEGRAM_AVAILABLE or Bot is None:
+        logger.warning("Telegram not available for reach")
+        return False
+    if config is None:
+        config = load_telegram_config()
+    if not config or not config.bot_token:
+        logger.warning("Telegram not configured for reach")
+        return False
+    chat_ids = _get_paired_chat_ids()
+    if not chat_ids:
+        logger.warning("No paired users for reach")
+        return False
+    bot = Bot(token=config.bot_token)
+    sent = 0
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id=chat_id, text=message)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Reach: failed to send to {chat_id}: {e}")
+    return sent > 0
+
+
+def send_to_paired_users(message: str, config: Optional[TelegramConfig] = None) -> bool:
+    """Synchronous wrapper: send a message to all paired Telegram users."""
+    return asyncio.run(send_to_paired_users_async(message, config))
+
 
 async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None):
     """Run the Telegram bot"""
@@ -616,14 +1173,28 @@ async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_int
     
     bot = TelegramBot(config, openclaw_integration)
     await bot.start()
-    
-    # Keep running until interrupted
+
+    # In-process scheduler for scheduled notifications (scheduled-notifications.json)
+    stop_event = asyncio.Event()
+    scheduler_task = asyncio.create_task(
+        run_scheduler_loop(config=config, stop_event=stop_event)
+    )
+
     try:
-        # Keep the event loop running
         print("Press Ctrl+C to stop the bot...")
-        await asyncio.Event().wait()  # Wait indefinitely
+        await asyncio.Event().wait()
     except KeyboardInterrupt:
-        print("\nStopping Telegram bot...")
-        logger.info("Stopping Telegram bot...")
-        await bot.stop()
-        print("Telegram bot stopped.")
+        pass
+    print("\nStopping Telegram bot...")
+    logger.info("Stopping Telegram bot...")
+    stop_event.set()
+    try:
+        await asyncio.wait_for(asyncio.shield(scheduler_task), timeout=15)
+    except asyncio.TimeoutError:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
+    await bot.stop()
+    print("Telegram bot stopped.")

@@ -13,4 +13,5 @@ PROJECT_ROOT="$DIR/.."
 PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH}"
 export PYTHONPATH
 
-python3 -m cursor_enhanced "$@"
+# Run from project root so imports (main, reach_schedules) resolve when cron runs from another cwd
+cd "$PROJECT_ROOT" && python3 -m cursor_enhanced "$@"

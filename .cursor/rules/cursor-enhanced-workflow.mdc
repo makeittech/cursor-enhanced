@@ -1,5 +1,5 @@
 ---
-description: Cursor Enhanced project workflow — commit, test before reload, feature discipline
+description: Cursor Enhanced project workflow — test before reload, commit after all features, push only after confirmation
 globs: ["**/cursor-enhanced/**", "cursor-enhanced/**", "**/cursor_enhanced/**"]
 alwaysApply: false
 ---
@@ -8,24 +8,33 @@ alwaysApply: false
 
 When working in the **cursor-enhanced** project (`~/cursor-enhanced` or any path under it):
 
-1. **Commit**  
-   After making changes, commit them (with a clear message). Do not leave the repo dirty unless the user asks otherwise.
+1. **Test before reload (you do it, not the user)**
 
-2. **Test before reload**  
    For every new feature or change that affects runtime behavior:
    - Add or update tests as needed.
-   - **Run the test suite** (`python -m unittest discover -s tests` from project root) **before** the service/process is reloaded or the agent “updates itself”. If tests fail, fix them before considering the feature done.
+   - **You** (the agent) **must run the test suite** (`python -m unittest discover -s tests` from project root) **before** the service/process is reloaded. Do not tell the user "next steps for you" or "run the tests"—run them yourself. If tests fail, fix them before considering the feature done.
+   - **You** (the agent) **must reload** the service after tests pass when you can (e.g. restart the process or systemd unit that runs cursor-enhanced/Telegram). If no such process or unit is running or visible to you, running the test suite is sufficient. Do not tell the user "reload the service" as their next step unless reload truly requires user-only access (e.g. production deploy).
 
-3. **Feature discipline**  
+2. **Commit only after all features are implemented**  
+   Do **not** commit after each single feature. Commit once when all features for the current scope/task are implemented and tested. Use a clear commit message. Do not leave the repo dirty at the end of a completed scope unless the user asks otherwise.
+
+3. **Push only after confirmation**  
+   **Never push without explicit user confirmation.** Commit locally as above, but do not run `git push` unless the user has confirmed they want to push.
+
+4. **Feature discipline**  
    Each new feature should:
    - Have a test run (or new tests) that are executed and passing.
    - Only then be considered complete and safe to rely on after reload.
 
-4. **Project layout**  
+5. **Project layout**  
    - Root: `main.py`, `openclaw_*.py`, `tool_executor.py`, `tests/`.
    - Package: `cursor_enhanced/` (re-exports and CLI).
    - Config: `~/.cursor-enhanced-config.json`; workspace under `~/.cursor-enhanced/`.
 
 Follow this workflow so the project stays test-covered and deployable.
 
-**Remember:** This rule file lives in the project at `.cursor/rules/cursor-enhanced-workflow.mdc`. If you use global Cursor rules, add a line there that says: when working in the cursor-enhanced project, apply the workflow in `.cursor/rules/cursor-enhanced-workflow.mdc` (commit, test before reload, feature discipline).
+**Remember (highly important):**
+- This rule file lives in the project at `.cursor/rules/cursor-enhanced-workflow.mdc`. If you use global Cursor rules, add a line there that says: when working in the cursor-enhanced project, apply the workflow in `.cursor/rules/cursor-enhanced-workflow.mdc`.
+- When the user talks to cursor-enhanced via Telegram, the system prompt also injects a short reminder of this workflow so the agent does not forget.
+- Order: implement features → **you run tests** → **you reload** → when all features are done, commit → **push only after user confirms**.
+- Never say "next steps for you" for running tests or reloading—those are the agent's responsibility. Only hand off to the user when something truly requires them (e.g. push after they confirm, or production deploy).

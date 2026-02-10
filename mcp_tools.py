@@ -14,6 +14,10 @@ import logging
 
 logger = logging.getLogger("cursor_enhanced.mcp")
 
+# Path to HA-only MCP config (used by delegate); include in main agent MCP discovery so HA appears in tools list
+MCP_HOMEASSISTANT_CONFIG_PATH = os.path.expanduser("~/.cursor/mcp-homeassistant-only.json")
+
+
 class MCPToolsClient:
     """Client for discovering and using MCP tools via Cursor"""
     
@@ -22,20 +26,18 @@ class MCPToolsClient:
         self.mcp_config_path = os.path.expanduser("~/.cursor/mcp.json")
     
     def discover_mcp_tools(self) -> List[Dict[str, Any]]:
-        """Discover MCP tools available through Cursor"""
+        """Discover MCP tools available through Cursor (includes Home Assistant MCP when configured)."""
         tools = []
+        seen_servers = set()
         
-        # Try to read MCP config if it exists
+        # Primary MCP config
         if os.path.exists(self.mcp_config_path):
             try:
                 with open(self.mcp_config_path, 'r') as f:
                     mcp_config = json.load(f)
                     servers = mcp_config.get("mcpServers", {})
-                    
                     for server_name, server_config in servers.items():
-                        # Extract tool information from server config
-                        # Note: Actual tool discovery would require connecting to MCP servers
-                        # This is a placeholder that can be extended
+                        seen_servers.add(server_name)
                         tools.append({
                             "name": f"mcp_{server_name}",
                             "server": server_name,
@@ -45,7 +47,25 @@ class MCPToolsClient:
             except Exception as e:
                 logger.warning(f"Failed to read MCP config: {e}")
         
-        # Also check for Cursor's built-in tools
+        # Merge Home Assistant MCP from HA-only config so it appears in the main agent's tools list
+        if os.path.isfile(MCP_HOMEASSISTANT_CONFIG_PATH) and "home-assistant" not in seen_servers:
+            try:
+                with open(MCP_HOMEASSISTANT_CONFIG_PATH, 'r') as f:
+                    ha_config = json.load(f)
+                    servers = ha_config.get("mcpServers") or ha_config.get("mcp_servers") or {}
+                    for key in ("home-assistant", "home_assistant"):
+                        if key in servers:
+                            tools.append({
+                                "name": "Home Assistant",
+                                "server": key,
+                                "description": "Control Home Assistant: entities, services, automations (MCP)",
+                                "type": "mcp"
+                            })
+                            break
+            except Exception as e:
+                logger.debug("Could not merge HA MCP config: %s", e)
+        
+        # Cursor built-in tools
         cursor_tools = self._discover_cursor_builtin_tools()
         tools.extend(cursor_tools)
         

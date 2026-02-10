@@ -669,6 +669,22 @@ except ImportError:
     DELEGATE_TOOL_AVAILABLE = False
     DelegateTool = None
 
+# Weather tool (Open-Meteo, no API key)
+try:
+    from openclaw_weather_tool import WeatherTool
+    WEATHER_TOOL_AVAILABLE = True
+except ImportError:
+    WEATHER_TOOL_AVAILABLE = False
+    WeatherTool = None
+
+# Smart delegate tool (complexity-aware model delegation)
+try:
+    from openclaw_smart_delegate import SmartDelegateTool
+    SMART_DELEGATE_AVAILABLE = True
+except ImportError:
+    SMART_DELEGATE_AVAILABLE = False
+    SmartDelegateTool = None
+
 class BrowserTool:
     """Browser tool (ported from browser-tool.ts)"""
     
@@ -989,8 +1005,10 @@ class ToolRegistry:
                     "session_status": "Get status of a session (requires gateway)",
                     "message": "Send messages to channels (requires gateway)",
                     "agents_list": "List available agents",
-                    "delegate": "Delegate a task to a sub-agent with a predefined personality (researcher, coder, reviewer, writer); receive the sub-agent's response",
-                    "personas_list": "List available delegate personas (ids and names)"
+                    "delegate": "Delegate a task to a sub-agent with a predefined personality (researcher, coder, reviewer, writer, home_assistant); receive the sub-agent's response",
+                    "personas_list": "List available delegate personas (ids and names)",
+                    "weather": "Get current weather and forecast for a city (default Lviv). Free Open-Meteo API, no key needed.",
+                    "smart_delegate": "Smart delegation: analyze task complexity, discover available models, pick the optimal one, announce the choice, and run a sub-agent with clean context. Use for complex tasks that need a stronger model.",
                 }
                 tool_info["description"] = desc_map.get(name, f"{name} tool")
             
@@ -1033,6 +1051,14 @@ class ToolRegistry:
         if DELEGATE_TOOL_AVAILABLE and DelegateTool is not None:
             self.tools["delegate"] = DelegateTool(self.config)
             self.tools["personas_list"] = self.tools["delegate"]
+
+        # Weather tool (Open-Meteo; no gateway, no API key)
+        if WEATHER_TOOL_AVAILABLE and WeatherTool is not None:
+            self.tools["weather"] = WeatherTool(self.config)
+
+        # Smart delegate tool (complexity-aware model delegation; no gateway)
+        if SMART_DELEGATE_AVAILABLE and SmartDelegateTool is not None:
+            self.tools["smart_delegate"] = SmartDelegateTool(self.config)
     
     async def execute(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute tool"""
@@ -1048,7 +1074,7 @@ class ToolRegistry:
             # Tools without action parameter (web_fetch, web_search, memory, sessions, message, agents, delegate, personas_list)
             elif tool_name in ["web_fetch", "web_search", "sessions_list", "sessions_send",
                               "sessions_history", "sessions_spawn", "session_status", "message", "agents_list",
-                              "delegate", "personas_list"]:
+                              "delegate", "personas_list", "weather", "smart_delegate"]:
                 if tool_name == "personas_list":
                     return {"personas": tool.list_personas()}
                 return await tool.execute(**params)
@@ -1088,4 +1114,12 @@ if SESSION_TOOLS_AVAILABLE:
 # Export delegate tool if available
 if DELEGATE_TOOL_AVAILABLE:
     __all__.extend(["DelegateTool"])
+
+# Export weather tool if available
+if WEATHER_TOOL_AVAILABLE:
+    __all__.extend(["WeatherTool"])
+
+# Export smart delegate tool if available
+if SMART_DELEGATE_AVAILABLE:
+    __all__.extend(["SmartDelegateTool"])
 

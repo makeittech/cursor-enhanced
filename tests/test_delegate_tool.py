@@ -15,7 +15,8 @@ class DelegateToolTests(unittest.TestCase):
         self.assertIn("coder", ids)
         self.assertIn("reviewer", ids)
         self.assertIn("writer", ids)
-        self.assertGreaterEqual(len(personas), 4)
+        self.assertIn("home_assistant", ids)
+        self.assertGreaterEqual(len(personas), 5)
 
     def test_custom_personas_override_defaults(self):
         tool = DelegateTool(config={
@@ -131,3 +132,31 @@ class DelegateToolTests(unittest.TestCase):
     def test_cursor_agent_path_from_config_delegate_key(self):
         tool = DelegateTool(config={"delegate": {"cursor_agent_path": "/delegate/path/agent"}})
         self.assertEqual(tool._cursor_agent_path, "/delegate/path/agent")
+
+    def test_home_assistant_persona_present(self):
+        tool = DelegateTool(config={})
+        personas = tool.list_personas()
+        ha = next((p for p in personas if p["id"] == "home_assistant"), None)
+        self.assertIsNotNone(ha)
+        self.assertEqual(ha["name"], "Home Assistant")
+
+    @patch("subprocess.run")
+    def test_home_assistant_persona_execute_passes_mcp_env_when_configured(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+        config = {
+            "delegate": {
+                "mcp_config_by_persona": {"home_assistant": "~/.cursor/mcp-homeassistant-only.json"},
+            },
+        }
+        with patch("openclaw_delegate_tool.os.path.isfile", return_value=True):
+            async def run():
+                tool = DelegateTool(config=config)
+                out = await tool.execute(persona_id="home_assistant", task="List lights.")
+                self.assertTrue(out.get("success"), out)
+
+            asyncio.run(run())
+        call_kw = mock_run.call_args[1]
+        self.assertIn("env", call_kw)
+        mcp_path = call_kw["env"].get("CURSOR_MCP_CONFIG_PATH")
+        self.assertIsNotNone(mcp_path)
+        self.assertTrue(mcp_path.endswith("mcp-homeassistant-only.json"))

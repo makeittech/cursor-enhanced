@@ -12,10 +12,15 @@ logger = logging.getLogger("cursor_enhanced.tool_executor")
 async def execute_tool_from_response(
     agent_response: str,
     openclaw_integration,
-    max_iterations: int = 3
+    max_iterations: int = 3,
+    *,
+    last_user_message: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Parse agent response for tool usage and execute tools.
+    If last_user_message is set and a delegate is run, the task is augmented with
+    a minimal "User asked: <truncated>" line so the sub-agent has the exact request
+    without needing to search, with minimal tokens.
     Returns: (updated_response, tool_results)
     """
     if not openclaw_integration:
@@ -42,9 +47,20 @@ async def execute_tool_from_response(
             r'look(?:ing)?\s+(?:in|through)\s+memory\s+(?:for)?\s+["\']?([^"\']+)["\']?',
         ],
         'delegate': [
-            r'delegate\s+(?:to|task to)\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s*[:\-]\s*([^\n]+?)(?=\n\n|\n\[|$)',
-            r'ask\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s+(?:agent\s+)?to\s+([^\n]+?)(?=\n\n|\n\[|$)',
-            r'have\s+(?:the\s+)?(researcher|coder|reviewer|writer)\s+([^\n]+?)(?=\n\n|\n\[|$)',
+            r'delegate\s+(?:to|task to)\s+(?:the\s+)?(researcher|coder|reviewer|writer|home_assistant|ha)\s*[:\-]\s*([^\n]+?)(?=\n\n|\n\[|$)',
+            r'ask\s+(?:the\s+)?(researcher|coder|reviewer|writer|home_assistant|ha)\s+(?:agent\s+)?to\s+([^\n]+?)(?=\n\n|\n\[|$)',
+            r'have\s+(?:the\s+)?(researcher|coder|reviewer|writer|home_assistant|ha)\s+([^\n]+?)(?=\n\n|\n\[|$)',
+        ],
+        'weather': [
+            r'(?:get|fetch|check)(?:ting)?\s+(?:the\s+)?(?:current\s+)?weather\s+(?:in|for|at)\s+([^\.\n,]+)',
+            r'(?:get|fetch|check)(?:ting)?\s+(?:the\s+)?forecast\s+(?:in|for|at)\s+([^\.\n,]+)',
+            r'weather\s+(?:in|for|at)\s+([^\.\n,]+)',
+        ],
+        'smart_delegate': [
+            # Explicit: "smart delegate: <task>" or "delegate to stronger model: <task>"
+            r'smart\s+delegat(?:e|ing)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
+            r'delegat(?:e|ing)\s+(?:this\s+)?(?:to\s+(?:a\s+)?)?(?:stronger|better|more\s+capable|optimal|profound)\s+(?:model|agent)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
+            r'(?:need|use|pick|choose)\s+(?:a\s+)?(?:stronger|better|more\s+capable|optimal)\s+model\s+(?:for|to)\s*[:\-]?\s*(.+?)(?=\n\n|\n\[|$)',
         ],
     }
     
@@ -188,12 +204,22 @@ async def execute_tool_from_response(
                 persona_id = (match.group(1) or "").strip().lower()
                 task = (match.group(2) or "").strip()
                 if persona_id and task and len(task) > 5:
+                    if persona_id == "ha":
+                        persona_id = "home_assistant"
                     delegate_matches.append((persona_id, task))
+    # Max chars of last user message to append so sub-agent has exact request (minimal tokens, no misinterpretation)
+    DELEGATE_USER_CTX_MAX = 350
+
     for persona_id, task in delegate_matches[:1]:  # Limit 1 delegate per response to avoid long runs
+        task_to_send = task
+        if last_user_message and (s := last_user_message.strip()):
+            one_line = s.split("\n")[0][:DELEGATE_USER_CTX_MAX].strip()
+            if one_line:
+                task_to_send = f"{task.strip()}\nUser asked: {one_line}"
         try:
-            logger.info(f"Executing delegate tool: persona={persona_id}, task={task[:80]}...")
+            logger.info(f"Executing delegate tool: persona={persona_id}, task={task_to_send[:80]}...")
             result = await openclaw_integration.tool_registry.execute(
-                "delegate", "", {"persona_id": persona_id, "task": task}
+                "delegate", "", {"persona_id": persona_id, "task": task_to_send}
             )
             tool_results.append({"tool": "delegate", "persona_id": persona_id, "result": result})
             if result.get("success"):
@@ -205,5 +231,82 @@ async def execute_tool_from_response(
             logger.error(f"Failed to run delegate for {persona_id}: {e}")
             tool_results.append({"tool": "delegate", "persona_id": persona_id, "error": str(e)})
             updated_response += f"\n\n[Delegate Error: {persona_id}] {str(e)}"
+
+    # Execute weather tool if city mentions found
+    weather_cities = []
+    for pattern in tool_patterns.get('weather', []):
+        for match in re.finditer(pattern, agent_response, re.IGNORECASE):
+            if match.groups():
+                city = clean_query(match.group(1))
+                if city and len(city) > 1 and city not in weather_cities:
+                    weather_cities.append(city)
+
+    for city in weather_cities[:1]:  # Limit to 1 weather lookup per response
+        try:
+            logger.info(f"Executing weather tool for city: {city}")
+            result = await openclaw_integration.tool_registry.execute("weather", "", {"city": city})
+            tool_results.append({"tool": "weather", "city": city, "result": result})
+            if result and "error" not in result:
+                cur = result.get("current", {})
+                forecast = result.get("forecast", [])
+                city_name = result.get("city", city)
+                lines = [f"\n\n[Weather: {city_name}]"]
+                if cur:
+                    lines.append(
+                        f"Now: {cur.get('weather', '?')}, {cur.get('temperature_c', '?')}°C "
+                        f"(feels {cur.get('feels_like_c', '?')}°C), "
+                        f"humidity {cur.get('humidity_pct', '?')}%, "
+                        f"wind {cur.get('wind_speed_kmh', '?')} km/h"
+                    )
+                if forecast:
+                    lines.append("Forecast:")
+                    for day in forecast[:7]:
+                        lines.append(
+                            f"  {day.get('date', '?')}: {day.get('weather', '?')}, "
+                            f"{day.get('temp_min_c', '?')}–{day.get('temp_max_c', '?')}°C, "
+                            f"precip {day.get('precipitation_mm', 0)}mm"
+                        )
+                updated_response += "\n".join(lines)
+            else:
+                updated_response += f"\n\n[Weather Error: {result.get('error', 'Unknown error')}]"
+        except Exception as e:
+            logger.error(f"Failed to execute weather tool for {city}: {e}")
+            tool_results.append({"tool": "weather", "city": city, "error": str(e)})
+            updated_response += f"\n\n[Weather Error: {str(e)}]"
+
+    # Smart delegate: detect "smart delegate: <task>" or "delegate to stronger model: <task>"
+    smart_delegate_matches = []
+    for pattern in tool_patterns.get("smart_delegate", []):
+        for match in re.finditer(pattern, agent_response, re.IGNORECASE | re.DOTALL):
+            if match.groups():
+                task = (match.group(1) or "").strip()
+                if task and len(task) > 10:
+                    smart_delegate_matches.append(task)
+
+    for task in smart_delegate_matches[:1]:  # Limit 1 per response
+        # Augment with original user request for context
+        task_to_send = task
+        if last_user_message and (s := last_user_message.strip()):
+            one_line = s.split("\n")[0][:500].strip()
+            if one_line:
+                task_to_send = f"{task.strip()}\n\nOriginal user request: {one_line}"
+        try:
+            logger.info(f"Executing smart_delegate: task={task_to_send[:80]}...")
+            result = await openclaw_integration.tool_registry.execute(
+                "smart_delegate", "", {"task": task_to_send}
+            )
+            tool_results.append({"tool": "smart_delegate", "result": result})
+            announcement = result.get("announcement", "")
+            if announcement:
+                updated_response += f"\n\n{announcement}"
+            if result.get("success"):
+                resp = result.get("response", "") or ""
+                updated_response += f"\n\n[Smart Delegate Response]\n{resp[:6000]}{'...' if len(resp) > 6000 else ''}"
+            else:
+                updated_response += f"\n\n[Smart Delegate Error] {result.get('error', 'Unknown error')}"
+        except Exception as e:
+            logger.error(f"Failed to run smart_delegate: {e}")
+            tool_results.append({"tool": "smart_delegate", "error": str(e)})
+            updated_response += f"\n\n[Smart Delegate Error] {str(e)}"
 
     return updated_response, tool_results
