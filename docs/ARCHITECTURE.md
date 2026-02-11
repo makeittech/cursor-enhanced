@@ -1,6 +1,6 @@
 # Architecture
 
-Cursor Enhanced is a lightweight wrapper around `cursor-agent` with OpenClaw-style
+Cursor Enhanced is a lightweight wrapper around `cursor-agent` with Runtime-style
 tooling, session management, and memory handling.
 
 ## High-level flow
@@ -15,8 +15,8 @@ tooling, session management, and memory handling.
 ## Key modules
 
 - `main.py` — primary CLI flow and prompt orchestration.
-- `openclaw_core.py` — session store, tool registry, memory tools.
-- `openclaw_integration.py` — integration layer for OpenClaw-style features.
+- `runtime_core.py` — session store, tool registry, memory tools.
+- `runtime_integration.py` — integration layer for Runtime-style features.
 - `tool_executor.py` — tool detection and execution.
 - `mcp_tools.py` — MCP tools discovery client.
 - `telegram_integration.py` — optional Telegram bot integration.
@@ -28,7 +28,7 @@ Default paths under `~/.cursor-enhanced/`:
 - `history` files: conversation logs (per chat).
 - `history-meta` files: compaction + memory flush metadata.
 - `logs/`: rotating log files.
-- `workspace/`: memory + skills files (OpenClaw-style).
+- `workspace/`: memory + skills files (Runtime-style).
 
 ## Memory
 

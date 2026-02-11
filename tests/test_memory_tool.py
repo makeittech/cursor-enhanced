@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from openclaw_core import MemoryTool
+from runtime_core import MemoryTool
 
 
 class MemoryToolTests(unittest.TestCase):

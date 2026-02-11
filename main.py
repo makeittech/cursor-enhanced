@@ -11,12 +11,12 @@ import asyncio
 import re
 from typing import Optional, Dict, Any, Tuple, List
 
-# OpenClaw integration imports
-OPENCLAW_AVAILABLE = False
+# Runtime integration imports
+RUNTIME_AVAILABLE = False
 try:
-    from openclaw_integration import get_openclaw_integration, SessionEntry
+    from runtime_integration import get_runtime_integration, SessionEntry
     from mcp_tools import get_mcp_client
-    OPENCLAW_AVAILABLE = True
+    RUNTIME_AVAILABLE = True
 except ImportError as e:
     # Logger will be set up later, just mark as unavailable
     pass
@@ -28,12 +28,14 @@ except Exception:
 
 DEFAULT_HISTORY_FILE = os.path.expanduser("~/.cursor-enhanced-history.json")
 CONFIG_FILE = os.path.expanduser("~/.cursor-enhanced-config.json")
+# Default model for cursor-agent: "auto" so Cursor picks; never use opus/sonnet etc. by default
+CURSOR_AGENT_DEFAULT_MODEL = "auto"
 DEFAULT_HISTORY_LIMIT = 10
 TOKEN_LIMIT = 100000
 # Approximating 1 token as 4 characters
 CHARS_PER_TOKEN = 4
 
-# Memory flush settings (OpenClaw-style pre-compaction)
+# Memory flush settings (Runtime-style pre-compaction)
 MEMORY_FLUSH_NO_REPLY = "NO_REPLY"
 DEFAULT_MEMORY_FLUSH_SOFT_TOKENS = 4000
 DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR = 20000
@@ -72,6 +74,23 @@ SMART_DELEGATE_SYSTEM_PROMPT = (
     "The user should see the model choice and reasoning. This transparency is a core feature.\n"
     "Example: 'This requires deep architecture analysis. smart delegate: Design a microservices "
     "architecture for the payment system with the following requirements...'\n"
+)
+
+# Cursor Agent model policy (appended to system prompt when cursor_agent tool is available)
+CURSOR_AGENT_MODEL_POLICY = (
+    "\n\n=== Cursor Cloud Agent: Model Policy (MANDATORY) ===\n"
+    "cursor-enhanced uses the default model (auto) only. Do NOT ask the user for permission to use other models.\n"
+    "When launching Cursor Cloud Agents (cursor_agent tool), you MUST follow this policy:\n"
+    "1. ALWAYS use the default model (auto). Do NOT specify model= when launching agents.\n"
+    "2. Do NOT pick, suggest, or offer opus, sonnet, gpt-5, or ANY specific model. Do NOT ask 'Would you prefer a specific model?' — use auto only.\n"
+    "3. If the user explicitly requests a specific model, ONLY then pass it (with user_confirmed_model).\n"
+    "4. The system enforces this: non-default models are REJECTED unless user_confirmed_model=True.\n"
+    "The default (auto) model lets Cursor pick the best model automatically. NEVER silently upgrade to a more expensive model. This is a hard rule.\n"
+)
+
+# One-line hint always in cursor-enhanced system prompt (model policy)
+DEFAULT_MODEL_SYSTEM_HINT = (
+    "cursor-enhanced uses the default model (auto) only. Do NOT ask the user for permission to use other models (e.g. opus, sonnet).\n"
 )
 
 # Appended to system prompt when running from Telegram (remind/plan/schedule)
@@ -250,9 +269,9 @@ def get_history_fitting_token_limit(history, max_tokens, system_prompt_tokens, u
     
     return selected_messages, current_tokens
 
-async def execute_tools_from_response(response: str, openclaw, logger) -> Optional[str]:
+async def execute_tools_from_response(response: str, runtime, logger) -> Optional[str]:
     """Parse agent response for tool usage and execute tools"""
-    if not openclaw:
+    if not runtime:
         return None
     
     results = []
@@ -288,7 +307,7 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
                     logger.info(f"Executing web_search tool with query: {query}")
                     # ToolRegistry.execute expects (tool_name, action, params)
                     # For web_search, action is empty string, params is a dict
-                    result = await openclaw.tool_registry.execute("web_search", "", {"query": query})
+                    result = await runtime.tool_registry.execute("web_search", "", {"query": query})
                     if result and not result.get("error"):
                         results.append(f"Web search for '{query}': {json.dumps(result, indent=2)}")
                     else:
@@ -313,7 +332,7 @@ async def execute_tools_from_response(response: str, openclaw, logger) -> Option
                     logger.info(f"Executing web_fetch tool with URL: {url}")
                     # ToolRegistry.execute expects (tool_name, action, params)
                     # For web_fetch, action is empty string, params is a dict
-                    result = await openclaw.tool_registry.execute("web_fetch", "", {"url": url})
+                    result = await runtime.tool_registry.execute("web_fetch", "", {"url": url})
                     if result and not result.get("error"):
                         content = result.get("content", "")[:1000]  # Limit content length
                         results.append(f"Fetched {url}: {content}...")
@@ -600,13 +619,14 @@ def main():
     parser.add_argument("--view-history", action="store_true", help="View conversation history")
     parser.add_argument("--system-prompt", type=str, default="default", help="Name of the system prompt configuration to use")
     parser.add_argument("--chat", type=str, default=None, help="Name of the chat session to use")
+    parser.add_argument("--fresh", action="store_true", help="Fresh context: no history, minimal system prompt (used by 'new' thread messages)")
     parser.add_argument("--model", type=str, default=None, help="Model to use (e.g., gpt-5, sonnet-4)")
-    parser.add_argument("--agent-id", type=str, default=None, help="Agent ID for multi-agent routing (OpenClaw-style)")
+    parser.add_argument("--agent-id", type=str, default=None, help="Agent ID for multi-agent routing (Runtime-style)")
     parser.add_argument("--session-id", type=str, default=None, help="Session ID for session management")
     parser.add_argument("--list-tools", action="store_true", help="List available MCP tools")
     parser.add_argument("--list-skills", action="store_true", help="List available skills")
-    parser.add_argument("--gateway-url", type=str, default=None, help="Gateway WebSocket URL (OpenClaw-style)")
-    parser.add_argument("--enable-openclaw", action="store_true", default=True, help="Enable OpenClaw integration features")
+    parser.add_argument("--gateway-url", type=str, default=None, help="Gateway WebSocket URL (Runtime-style)")
+    parser.add_argument("--enable-runtime", action="store_true", default=True, help="Enable Runtime integration features")
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     parser.add_argument("--telegram", action="store_true", help="Start Telegram bot")
     parser.add_argument("--telegram-approve", type=str, metavar="CODE", help="Approve Telegram pairing code")
@@ -869,7 +889,7 @@ def main():
             
             # Create a temporary bot instance to approve pairing
             # We don't need to start it, just use the approve method
-            bot = TelegramBot(config, openclaw_integration=None)
+            bot = TelegramBot(config, runtime_integration=None)
             code_upper = args.telegram_approve.upper()
             if bot.approve_pairing(code_upper):
                 print(f"✅ Pairing code {args.telegram_approve} approved successfully!")
@@ -908,7 +928,7 @@ def main():
         # Start Telegram bot
         try:
             from telegram_integration import run_telegram_bot, load_telegram_config
-            from openclaw_integration import get_openclaw_integration
+            from runtime_integration import get_runtime_integration
             
             config = load_telegram_config()
             if not config:
@@ -916,66 +936,194 @@ def main():
                 print("Set TELEGRAM_BOT_TOKEN environment variable or configure in ~/.cursor-enhanced-config.json")
                 return
             
-            openclaw = None
-            if OPENCLAW_AVAILABLE and args.enable_openclaw:
+            runtime = None
+            if RUNTIME_AVAILABLE and args.enable_runtime:
                 try:
-                    from openclaw_integration import get_openclaw_integration
+                    from runtime_integration import get_runtime_integration
                     app_config = load_config()
-                    openclaw = get_openclaw_integration(config=app_config)
+                    runtime = get_runtime_integration(config=app_config)
                 except Exception as e:
-                    logger.warning(f"Failed to initialize OpenClaw: {e}")
+                    logger.warning(f"Failed to initialize Runtime: {e}")
             
             print("Starting Telegram bot...")
-            asyncio.run(run_telegram_bot(config, openclaw))
+            asyncio.run(run_telegram_bot(config, runtime))
         except ImportError:
             print("Telegram integration not available. Install with: pip install python-telegram-bot")
         except Exception as e:
             print(f"Error starting Telegram bot: {e}")
         return
 
-    # Initialize OpenClaw integration if available
-    openclaw = None
+    # Initialize Runtime integration if available
+    runtime = None
     mcp_client = None
-    if OPENCLAW_AVAILABLE and args.enable_openclaw:
+    if RUNTIME_AVAILABLE and args.enable_runtime:
         try:
-            from openclaw_integration import get_openclaw_integration
+            from runtime_integration import get_runtime_integration
             from mcp_tools import get_mcp_client
-            openclaw = get_openclaw_integration(config=config)
+            runtime = get_runtime_integration(config=config)
             mcp_client = get_mcp_client()
             
             # Connect to gateway if URL provided
             if args.gateway_url:
                 try:
-                    asyncio.run(openclaw.connect_gateway(args.gateway_url, config=config))
+                    asyncio.run(runtime.connect_gateway(args.gateway_url, config=config))
                 except Exception as e:
                     logger.warning(f"Failed to connect to gateway: {e}")
         except Exception as e:
-            logger.warning(f"Failed to initialize OpenClaw integration: {e}")
+            logger.warning(f"Failed to initialize Runtime integration: {e}")
 
     # Handle tool/skill listing
     if args.list_tools:
         if mcp_client:
             tools = mcp_client.discover_mcp_tools()
-            openclaw_tools = openclaw.list_tools() if openclaw else []
+            runtime_tools = runtime.list_tools() if runtime else []
             print("Available MCP Tools:")
             for tool in tools:
                 print(f"  - {tool.get('name', 'unknown')}: {tool.get('description', '')}")
-            if openclaw_tools:
-                print("\nOpenClaw Tools:")
-                for tool in openclaw_tools:
+            if runtime_tools:
+                print("\nRuntime Tools:")
+                for tool in runtime_tools:
                     print(f"  - {tool.get('name', 'unknown')}: {tool.get('description', '')}")
         else:
             print("MCP tools not available")
         return
     
     if args.list_skills:
-        if openclaw:
-            skills = openclaw.list_skills()
+        if runtime:
+            skills = runtime.list_skills()
             print("Available Skills:")
             for skill in skills:
                 print(f"  - {skill}")
         else:
             print("Skills not available")
+        return
+
+    # Extract user_prompt and cursor_flags early (needed for fresh mode check)
+    flags_with_args = {
+        '--api-key', 
+        '-H', '--header', 
+        '--output-format', 
+        '--workspace'
+    }
+    
+    cursor_flags = []
+    
+    # Default to auto so we never use opus/sonnet etc. by default; only override if user passed --model
+    if args.model:
+        cursor_flags.extend(["--model", args.model])
+    else:
+        cursor_flags.extend(["--model", CURSOR_AGENT_DEFAULT_MODEL])
+
+    user_prompt_parts = []
+    
+    i = 0
+    while i < len(unknown_args):
+        arg = unknown_args[i]
+        
+        if arg.startswith("-"):
+            cursor_flags.append(arg)
+            if arg in flags_with_args:
+                if i + 1 < len(unknown_args):
+                    cursor_flags.append(unknown_args[i+1])
+                    i += 1
+            elif arg == '--resume':
+                if i + 1 < len(unknown_args) and not unknown_args[i+1].startswith("-"):
+                     cursor_flags.append(unknown_args[i+1])
+                     i += 1
+        else:
+            user_prompt_parts.append(arg)
+        
+        i += 1
+    
+    # Add --force flag if not already present
+    # This allows tool execution (like web_fetch) without explicit user approval
+    has_force = any(arg in ["--force", "-f"] for arg in cursor_flags)
+    if not has_force:
+        cursor_flags.append("--force")
+        logger.debug("Added --force flag to cursor-agent command for automatic tool execution")
+            
+    user_prompt = " ".join(user_prompt_parts)
+
+    # --- Fresh mode: minimal context, no history, no save ---
+    # Used by "new" prefix messages to spawn concurrent tasks without conversation history
+    if getattr(args, "fresh", False) and user_prompt:
+        logger.info(f"Fresh-mode request (no history, minimal context): {user_prompt[:100]}")
+
+        # Resolve only the base system prompt (no tool listings, no smart delegation bloat)
+        # This minimizes context sent to cursor-enhanced for "new" thread messages
+        system_prompt_content = ""
+        if args.system_prompt:
+            if "system_prompts" in config and args.system_prompt in config["system_prompts"]:
+                system_prompt_content = config["system_prompts"][args.system_prompt]
+            elif "system_prompts" in config and "default" in config["system_prompts"]:
+                system_prompt_content = config["system_prompts"]["default"]
+
+        fresh_prompt_parts = []
+        if system_prompt_content:
+            fresh_prompt_parts.append(f"System: {system_prompt_content}\n")
+        # Minimal tool hint so the model knows tools exist but we don't list every single one
+        # Only tool names, not full descriptions - keeps context minimal
+        if runtime and args.enable_runtime:
+            tool_names = [t.get("name", "?") for t in (runtime.list_tools() or [])]
+            if tool_names:
+                fresh_prompt_parts.append(
+                    f"\nAvailable tools: {', '.join(tool_names)}. "
+                    "Use them as needed.\n"
+                )
+        fresh_prompt_parts.append("User Current Request: " + user_prompt)
+        full_prompt = "".join(fresh_prompt_parts)
+
+        cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+        cmd = ["bash", cursor_agent_path] + cursor_flags + [full_prompt]
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            env=_env_for_cursor_agent(),
+        )
+
+        agent_response = ""
+        if process.stdout:
+            for line in process.stdout:
+                print(line, end="")
+                agent_response += line
+        if process.stderr:
+            for line in process.stderr:
+                print(line, end="", file=sys.stderr)
+        process.wait()
+
+        # Execute tools from response (still useful for fresh mode)
+        if process.returncode == 0 and runtime and args.enable_runtime:
+            try:
+                from tool_executor import execute_tool_from_response
+                original_response = agent_response
+                updated_response, tool_results = asyncio.run(
+                    execute_tool_from_response(agent_response, runtime, last_user_message=user_prompt)
+                )
+                if tool_results:
+                    logger.info(f"Fresh mode: executed {len(tool_results)} tools")
+                    new_content = updated_response[len(original_response):]
+                    if new_content:
+                        print(new_content)
+                    agent_response = updated_response
+            except Exception as e:
+                logger.warning(f"Fresh mode tool execution error: {e}")
+
+        if process.returncode == 0:
+            if not agent_response.strip():
+                fallback = "I received your message but the agent returned an empty response. Please try rephrasing."
+                print(fallback)
+            logger.info(f"Fresh-mode response: {agent_response.strip()[:200]}")
+        else:
+            logger.error(f"Fresh-mode agent failed with code {process.returncode}")
+            if not agent_response.strip():
+                print(f"Sorry, the agent encountered an error (exit code {process.returncode}). Please try again.")
+            sys.exit(process.returncode)
+        # Fresh mode: do NOT save to history
         return
 
     history_file = get_history_file(args.chat)
@@ -1009,50 +1157,6 @@ def main():
                 print("-" * 40 + "\n")
         return
 
-    # Robustly separate flags from the prompt.
-    flags_with_args = {
-        '--api-key', 
-        '-H', '--header', 
-        '--output-format', 
-        '--workspace'
-    }
-    
-    cursor_flags = []
-    
-    # Pass explicit arguments if present
-    if args.model:
-        cursor_flags.extend(["--model", args.model])
-
-    user_prompt_parts = []
-    
-    i = 0
-    while i < len(unknown_args):
-        arg = unknown_args[i]
-        
-        if arg.startswith("-"):
-            cursor_flags.append(arg)
-            if arg in flags_with_args:
-                if i + 1 < len(unknown_args):
-                    cursor_flags.append(unknown_args[i+1])
-                    i += 1
-            elif arg == '--resume':
-                if i + 1 < len(unknown_args) and not unknown_args[i+1].startswith("-"):
-                     cursor_flags.append(unknown_args[i+1])
-                     i += 1
-        else:
-            user_prompt_parts.append(arg)
-        
-        i += 1
-    
-    # Add --force flag if not already present
-    # This allows tool execution (like web_fetch) without explicit user approval
-    has_force = any(arg in ["--force", "-f"] for arg in cursor_flags)
-    if not has_force:
-        cursor_flags.append("--force")
-        logger.debug("Added --force flag to cursor-agent command for automatic tool execution")
-            
-    user_prompt = " ".join(user_prompt_parts)
-    
     if not user_prompt:
         # Use direct path for compatibility
         cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
@@ -1065,28 +1169,28 @@ def main():
     # Log user prompt
     logger.info(f"User Request (Session: {args.chat if args.chat else 'default'}): {user_prompt}")
 
-    # OpenClaw session management
+    # Runtime session management
     session_entry = None
-    if openclaw:
+    if runtime:
         try:
             # Create or get session
             session_id = args.session_id or args.chat or "default"
             agent_id = args.agent_id or "main"
             session_key = f"{agent_id}:{session_id}"
             
-            existing_session = openclaw.get_session(session_key)
+            existing_session = runtime.get_session(session_key)
             if existing_session:
                 session_entry = existing_session
             else:
-                session_entry = openclaw.create_session(
+                session_entry = runtime.create_session(
                     session_id=session_id,
                     agent_id=agent_id,
                     channel=args.chat
                 )
             
             # Set presence
-            openclaw.presence_manager.set_presence(session_key, True)
-            openclaw.presence_manager.set_typing(session_key, True)
+            runtime.presence_manager.set_presence(session_key, True)
+            runtime.presence_manager.set_typing(session_key, True)
         except Exception as e:
             logger.warning(f"Session management error: {e}")
 
@@ -1113,7 +1217,7 @@ def main():
     system_prompt_tokens = estimate_tokens(system_prompt_content)
     user_prompt_tokens = estimate_tokens("User Current Request: " + user_prompt)
 
-    # Pre-compaction memory flush (OpenClaw-style)
+    # Pre-compaction memory flush (Runtime-style)
     memory_flush_settings = resolve_memory_flush_settings(config)
     total_history_text = format_history_for_prompt(history)
     total_estimated_all = estimate_tokens(total_history_text) + system_prompt_tokens + user_prompt_tokens
@@ -1176,6 +1280,7 @@ def main():
         logger.info(f"Selected {len(context_history)} messages ({tokens_used} tokens) for context.")
 
     full_prompt_parts = []
+    full_prompt_parts.append(DEFAULT_MODEL_SYSTEM_HINT)
     if system_prompt_content:
         full_prompt_parts.append(f"System: {system_prompt_content}\n")
     if os.environ.get("CURSOR_ENHANCED_CHANNEL") == "telegram":
@@ -1192,8 +1297,8 @@ def main():
             "This transparency is a core cursor-enhanced feature.\n"
         )
     
-    # Add OpenClaw tools information to system prompt
-    if openclaw and args.enable_openclaw:
+    # Add Runtime tools information to system prompt
+    if runtime and args.enable_runtime:
         tools_info = []
         if mcp_client:
             mcp_tools = mcp_client.discover_mcp_tools()
@@ -1202,10 +1307,10 @@ def main():
                 for tool in mcp_tools[:10]:  # Limit to first 10
                     tools_info.append(f"- {tool.get('name')}: {tool.get('description', '')}")
         
-        openclaw_tools = openclaw.list_tools()
-        if openclaw_tools:
-            tools_info.append("\n=== Available OpenClaw Tools ===")
-            for tool in openclaw_tools:
+        runtime_tools = runtime.list_tools()
+        if runtime_tools:
+            tools_info.append("\n=== Available Runtime Tools ===")
+            for tool in runtime_tools:
                 name = tool.get('name', 'unknown')
                 desc = tool.get('description', '')
                 if desc:
@@ -1213,7 +1318,7 @@ def main():
                 else:
                     tools_info.append(f"- {name}")
         
-        skills = openclaw.list_skills()
+        skills = runtime.list_skills()
         if skills:
             tools_info.append(f"\n=== Available Skills ({len(skills)}) ===")
             tools_info.append(", ".join(skills[:10]))  # Limit to first 10
@@ -1228,8 +1333,12 @@ def main():
             full_prompt_parts.append("The system will execute the appropriate tool and provide you with the results.\n\n")
         
         # Add smart delegation instructions if the tool is available
-        if "smart_delegate" in (openclaw.tool_registry.tools if hasattr(openclaw.tool_registry, 'tools') else {}):
+        if "smart_delegate" in (runtime.tool_registry.tools if hasattr(runtime.tool_registry, 'tools') else {}):
             full_prompt_parts.append(SMART_DELEGATE_SYSTEM_PROMPT)
+        
+        # Add cursor agent model policy if the tool is available
+        if "cursor_agent" in (runtime.tool_registry.tools if hasattr(runtime.tool_registry, 'tools') else {}):
+            full_prompt_parts.append(CURSOR_AGENT_MODEL_POLICY)
     
     full_prompt_parts.append(formatted_history)
     full_prompt_parts.append("User Current Request: " + user_prompt)
@@ -1270,35 +1379,48 @@ def main():
     process.wait()
     
     # Execute tools mentioned in agent response
-    if process.returncode == 0 and openclaw and args.enable_openclaw:
+    if process.returncode == 0 and runtime and args.enable_runtime:
         try:
             from tool_executor import execute_tool_from_response
+            original_response = agent_response
             updated_response, tool_results = asyncio.run(
-                execute_tool_from_response(agent_response, openclaw, last_user_message=user_prompt)
+                execute_tool_from_response(agent_response, runtime, last_user_message=user_prompt)
             )
             if tool_results:
                 logger.info(f"Executed {len(tool_results)} tools from agent response")
+                # Print any new content (tool results) that was appended to stdout
+                # so that callers (e.g. Telegram subprocess) can capture it
+                new_content = updated_response[len(original_response):]
+                if new_content:
+                    print(new_content)
                 # Use updated response with tool results
                 agent_response = updated_response
         except Exception as e:
             logger.warning(f"Failed to execute tools from response: {e}")
     
     if process.returncode == 0:
+        # Handle empty agent response: cursor-agent sometimes returns 0 with no output
+        if not agent_response.strip():
+            fallback = "I received your message but the agent returned an empty response. This can happen with complex queries — please try rephrasing or simplifying your request."
+            logger.warning("cursor-agent returned 0 with empty stdout; printing fallback")
+            print(fallback)
+            agent_response = fallback
+
         # Save to history
         history.append({"role": "user", "content": user_prompt})
         history.append({"role": "agent", "content": agent_response.strip()})
         save_history(history, history_file)
         
-        # Update OpenClaw session
-        if openclaw and session_entry:
+        # Update Runtime session
+        if runtime and session_entry:
             try:
                 session_key = session_entry.session_key
-                openclaw.presence_manager.set_typing(session_key, False)
+                runtime.presence_manager.set_typing(session_key, False)
                 # Update session metadata if needed
                 if session_entry:
                     session_entry.metadata = session_entry.metadata or {}
                     session_entry.metadata["last_interaction"] = datetime.now().isoformat()
-                    openclaw.session_store.set(session_entry.session_key, session_entry)
+                    runtime.session_store.set(session_entry.session_key, session_entry)
             except Exception as e:
                 logger.warning(f"Failed to update session: {e}")
         
@@ -1318,9 +1440,9 @@ def main():
         print(error_msg)
         logger.error(f"Agent stderr: {stderr_text[:500]}")
         # Update presence on error
-        if openclaw and session_entry:
+        if runtime and session_entry:
             try:
-                openclaw.presence_manager.set_typing(session_entry.session_key, False)
+                runtime.presence_manager.set_typing(session_entry.session_key, False)
             except:
                 pass
         sys.exit(process.returncode)

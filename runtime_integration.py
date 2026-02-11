@@ -1,7 +1,7 @@
 """
-OpenClaw Integration Module for Cursor Enhanced
+Runtime Integration Module for Cursor Enhanced
 
-This module integrates OpenClaw's architecture and features into cursor-enhanced,
+This module integrates Runtime's architecture and features into cursor-enhanced,
 providing:
 - MCP tools connection
 - Tool system (browser, canvas, nodes, skills)
@@ -21,9 +21,9 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import logging
 
-# Import OpenClaw core features
+# Import Runtime core features
 try:
-    from openclaw_core import (
+    from runtime_core import (
         SessionStore, SessionEntry,
         SkillsManager, SkillSnapshot,
         GatewayClient,
@@ -31,11 +31,11 @@ try:
         ThinkLevel, VerboseLevel, normalize_think_level, normalize_verbose_level,
         format_token_count, format_usd, estimate_usage_cost, ModelCostConfig, UsageTotals
     )
-    OPENCLAW_CORE_AVAILABLE = True
+    RUNTIME_CORE_AVAILABLE = True
 except ImportError as e:
-    OPENCLAW_CORE_AVAILABLE = False
-    logger = logging.getLogger("cursor_enhanced.openclaw")
-    logger.warning(f"OpenClaw core not available: {e}")
+    RUNTIME_CORE_AVAILABLE = False
+    logger = logging.getLogger("cursor_enhanced.runtime")
+    logger.warning(f"Runtime core not available: {e}")
 
 # Optional websockets import
 try:
@@ -44,7 +44,7 @@ try:
 except ImportError:
     WEBSOCKETS_AVAILABLE = False
 
-logger = logging.getLogger("cursor_enhanced.openclaw")
+logger = logging.getLogger("cursor_enhanced.runtime")
 
 # MCP Tools Integration
 class MCPTool:
@@ -62,7 +62,7 @@ class MCPTool:
         }
 
 class ToolRegistry:
-    """Registry for managing available tools (inspired by OpenClaw's tool system)"""
+    """Registry for managing available tools (inspired by Runtime's tool system)"""
     
     def __init__(self):
         self.tools: Dict[str, MCPTool] = {}
@@ -105,10 +105,10 @@ class ToolRegistry:
         # For now, return a placeholder
         return {"success": False, "error": "MCP tool execution not yet implemented"}
 
-# Session Management (OpenClaw-style)
+# Session Management (Runtime-style)
 @dataclass
 class SessionEntry:
-    """Represents a session entry (inspired by OpenClaw's session model)"""
+    """Represents a session entry (inspired by Runtime's session model)"""
     session_id: str
     session_key: str
     updated_at: Optional[int] = None
@@ -127,14 +127,14 @@ class SessionEntry:
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
-# Use OpenClaw core SessionStore if available, otherwise fallback
-if OPENCLAW_CORE_AVAILABLE:
+# Use Runtime core SessionStore if available, otherwise fallback
+if RUNTIME_CORE_AVAILABLE:
     # Use the core SessionStore directly
     pass
 else:
     # Fallback implementation
     class SessionStore:
-        """Manages session storage (inspired by OpenClaw's session store)"""
+        """Manages session storage (inspired by Runtime's session store)"""
         
         def __init__(self, store_path: Optional[str] = None):
             if store_path is None:
@@ -191,14 +191,14 @@ else:
                 del self.sessions[session_key]
                 self.save()
 
-# Gateway Client - use from openclaw_core if available
-if OPENCLAW_CORE_AVAILABLE:
+# Gateway Client - use from runtime_core if available
+if RUNTIME_CORE_AVAILABLE:
     # Use the core GatewayClient
     pass
 else:
     # Fallback GatewayClient implementation
     class GatewayClient:
-        """Client for communicating with a Gateway WebSocket server (OpenClaw-style)"""
+        """Client for communicating with a Gateway WebSocket server (Runtime-style)"""
         
         def __init__(self, gateway_url: str = "ws://127.0.0.1:18789", gateway_token: Optional[str] = None):
             self.gateway_url = gateway_url
@@ -254,15 +254,15 @@ else:
                 logger.error(f"Gateway call failed: {e}")
                 return {"error": str(e)}
 
-# Skills Platform (OpenClaw-style)
-    # Use OpenClaw core SkillsManager if available, otherwise fallback
-if OPENCLAW_CORE_AVAILABLE:
+# Skills Platform (Runtime-style)
+    # Use Runtime core SkillsManager if available, otherwise fallback
+if RUNTIME_CORE_AVAILABLE:
     # Use the core SkillsManager directly - it has list_skills() method
     pass
 else:
     # Fallback implementation
     class SkillsManager:
-        """Manages skills (inspired by OpenClaw's skills platform)"""
+        """Manages skills (inspired by Runtime's skills platform)"""
         
         def __init__(self, workspace_dir: Optional[str] = None):
             if workspace_dir is None:
@@ -313,7 +313,7 @@ else:
                 logger.error(f"Failed to read skill info: {e}")
                 return None
 
-# Presence and Usage Tracking (OpenClaw-style)
+# Presence and Usage Tracking (Runtime-style)
 @dataclass
 class UsageStats:
     """Usage statistics for a session"""
@@ -325,7 +325,7 @@ class UsageStats:
     timestamp: Optional[float] = None
 
 class PresenceManager:
-    """Manages presence and typing indicators (OpenClaw-style)"""
+    """Manages presence and typing indicators (Runtime-style)"""
     
     def __init__(self):
         self.active_sessions: Dict[str, bool] = {}
@@ -356,15 +356,15 @@ def _load_integration_config() -> Dict[str, Any]:
     return {}
 
 
-# Main OpenClaw Integration Class
-class OpenClawIntegration:
-    """Main integration class that brings OpenClaw features to cursor-enhanced"""
+# Main Runtime Integration Class
+class RuntimeIntegration:
+    """Main integration class that brings Runtime features to cursor-enhanced"""
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config if config is not None else _load_integration_config()
-        if OPENCLAW_CORE_AVAILABLE:
+        if RUNTIME_CORE_AVAILABLE:
             # Use core implementations
-            from openclaw_core import ToolRegistry
+            from runtime_core import ToolRegistry
             self.session_store = SessionStore()
             self.skills_manager = SkillsManager()
             self.gateway_client: Optional[GatewayClient] = None
@@ -379,7 +379,7 @@ class OpenClawIntegration:
         
         self.presence_manager = PresenceManager()
         
-        if not OPENCLAW_CORE_AVAILABLE:
+        if not RUNTIME_CORE_AVAILABLE:
             self._register_default_tools()
     
     def _register_default_tools(self):
@@ -449,8 +449,8 @@ class OpenClawIntegration:
     
     async def connect_gateway(self, gateway_url: str = "ws://127.0.0.1:18789", token: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
         """Connect to a gateway WebSocket server"""
-        if OPENCLAW_CORE_AVAILABLE:
-            from openclaw_core import GatewayClient, ToolRegistry
+        if RUNTIME_CORE_AVAILABLE:
+            from runtime_core import GatewayClient, ToolRegistry
             self.gateway_client = GatewayClient(gateway_url, token=token)
             await self.gateway_client.connect()
             # Re-initialize tool registry with gateway client and config
@@ -482,16 +482,16 @@ class OpenClawIntegration:
     
     async def execute_tool(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool"""
-        if OPENCLAW_CORE_AVAILABLE and self.tool_registry:
+        if RUNTIME_CORE_AVAILABLE and self.tool_registry:
             return await self.tool_registry.execute(tool_name, action, params)
-        elif not OPENCLAW_CORE_AVAILABLE:
+        elif not RUNTIME_CORE_AVAILABLE:
             return await self.tool_registry.execute_tool(tool_name, params)
         else:
             raise RuntimeError("Tool registry not initialized")
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """List all available tools"""
-        if OPENCLAW_CORE_AVAILABLE and self.tool_registry:
+        if RUNTIME_CORE_AVAILABLE and self.tool_registry:
             # Return tool information from registry
             tools = []
             for name, tool in self.tool_registry.tools.items():
@@ -504,7 +504,7 @@ class OpenClawIntegration:
                     tool_info["description"] = tool.__doc__.strip().split('\n')[0]
                 tools.append(tool_info)
             return tools
-        elif not OPENCLAW_CORE_AVAILABLE:
+        elif not RUNTIME_CORE_AVAILABLE:
             return self.tool_registry.list_tools()
         else:
             return []
@@ -514,11 +514,11 @@ class OpenClawIntegration:
         return self.skills_manager.list_skills()
 
 # Global instance
-_openclaw_integration: Optional[OpenClawIntegration] = None
+_runtime_integration: Optional[RuntimeIntegration] = None
 
-def get_openclaw_integration(config: Optional[Dict[str, Any]] = None) -> OpenClawIntegration:
-    """Get or create the global OpenClaw integration instance. Optionally pass config (e.g. from load_config()); if omitted, config is loaded from ~/.cursor-enhanced-config.json."""
-    global _openclaw_integration
-    if _openclaw_integration is None:
-        _openclaw_integration = OpenClawIntegration(config=config)
-    return _openclaw_integration
+def get_runtime_integration(config: Optional[Dict[str, Any]] = None) -> RuntimeIntegration:
+    """Get or create the global Runtime integration instance. Optionally pass config (e.g. from load_config()); if omitted, config is loaded from ~/.cursor-enhanced-config.json."""
+    global _runtime_integration
+    if _runtime_integration is None:
+        _runtime_integration = RuntimeIntegration(config=config)
+    return _runtime_integration

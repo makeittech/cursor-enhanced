@@ -1,15 +1,15 @@
 # Cursor Enhanced
 
 A production-ready wrapper for `cursor-agent` with persistent history, context
-management, OpenClaw-style tooling, and configurable system prompts.
+management, Runtime-style tooling, and configurable system prompts.
 
 ## Features
 
 - **Persistent History**: Remembers your conversation across sessions, stored in `~/.cursor-enhanced-history.json` (or per-chat files).
 - **Smart Context Management**: Automatically selects conversation history that fits within token limits (~100k tokens default) using intelligent token-based selection.
 - **Auto-Summarization**: Automatically compresses old conversation history when it exceeds token limits, preserving recent messages and creating a summary of older ones.
-- **Memory Flush**: OpenClaw-style pre-compaction memory flush to store durable notes in `MEMORY.md` and daily logs.
-- **Tooling**: OpenClaw tool registry with memory search, web fetch, and session tools.
+- **Memory Flush**: Runtime-style pre-compaction memory flush to store durable notes in `MEMORY.md` and daily logs.
+- **Tooling**: Runtime tool registry with memory search, web fetch, and session tools.
 - **MCP Discovery**: Discovers MCP tools from Cursor's MCP configuration.
 - **Telegram Bot**: Optional Telegram integration with pairing-based access control.
 - **Multiple Chats**: Support for separate chat sessions using `--chat <name>`, each with its own history file.

@@ -1,4 +1,4 @@
-# OpenClaw Integration Summary
+# Runtime Integration Summary
 
 ## ✅ Completed Features
 
@@ -57,10 +57,10 @@
 
 ## Files Created
 
-1. `openclaw_core.py` (1001 lines) - Core OpenClaw features
-2. `openclaw_integration.py` (504 lines) - Integration layer
-3. `openclaw_web_tools.py` (130 lines) - Web tools
-4. `openclaw_session_tools.py` (200+ lines) - Session tools
+1. `runtime_core.py` (1001 lines) - Core Runtime features
+2. `runtime_integration.py` (504 lines) - Integration layer
+3. `runtime_web_tools.py` (130 lines) - Web tools
+4. `runtime_session_tools.py` (200+ lines) - Session tools
 5. `mcp_tools.py` (200+ lines) - MCP tools client
 6. `requirements.txt` - Dependencies
 7. `VALIDATION_REPORT.md` - Validation report

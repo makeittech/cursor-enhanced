@@ -43,7 +43,7 @@ Cursor Enhanced reads configuration from:
 
 ### Memory flush
 
-OpenClaw-style pre-compaction memory flush:
+Runtime-style pre-compaction memory flush:
 
 - `agents.defaults.compaction.reserveTokensFloor` (int): Reserved tokens at end of context.
 - `agents.defaults.compaction.memoryFlush.enabled` (bool)

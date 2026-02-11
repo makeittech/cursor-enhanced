@@ -2,7 +2,7 @@
 Telegram Integration for Cursor Enhanced
 
 This module provides Telegram bot integration, allowing cursor-enhanced to
-receive and respond to messages via Telegram, similar to OpenClaw's Telegram channel.
+receive and respond to messages via Telegram, similar to Runtime's Telegram channel.
 """
 
 import os
@@ -364,12 +364,12 @@ DEFAULT_MENU_ITEMS: List[Dict[str, Any]] = [
 class TelegramBot:
     """Telegram bot for cursor-enhanced"""
     
-    def __init__(self, config: TelegramConfig, openclaw_integration=None):
+    def __init__(self, config: TelegramConfig, runtime_integration=None):
         if not TELEGRAM_AVAILABLE or Update is None:
             raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
         
         self.config = config
-        self.openclaw = openclaw_integration
+        self.runtime = runtime_integration
         self.application = None
         self.bot = None
         self.pairing_store_path = os.path.expanduser("~/.cursor-enhanced/telegram-pairings.json")
@@ -667,7 +667,7 @@ class TelegramBot:
         """Execute a weather menu item directly via WeatherTool (fast, in-process)."""
         city = item.get("city", "Lviv")
         try:
-            from openclaw_weather_tool import WeatherTool
+            from runtime_weather_tool import WeatherTool
             tool = WeatherTool()
             result = await tool.execute(city=city, forecast_days=7)
             if "error" in result:
@@ -712,10 +712,10 @@ class TelegramBot:
         if not task:
             return "Menu item has no task configured."
 
-        # Try using the delegate tool directly if openclaw is available
-        if self.openclaw and hasattr(self.openclaw, "tool_registry"):
+        # Try using the delegate tool directly if runtime is available
+        if self.runtime and hasattr(self.runtime, "tool_registry"):
             try:
-                result = await self.openclaw.tool_registry.execute(
+                result = await self.runtime.tool_registry.execute(
                     "delegate", "", {"persona_id": persona_id, "task": task}
                 )
                 if result.get("success"):
@@ -725,7 +725,7 @@ class TelegramBot:
                     logger.warning(f"Delegate {persona_id} failed: {error}")
                     # Fall through to subprocess
             except Exception as e:
-                logger.warning(f"Delegate via openclaw failed, falling back to subprocess: {e}")
+                logger.warning(f"Delegate via runtime failed, falling back to subprocess: {e}")
 
         # Fallback: run via cursor-enhanced subprocess
         return await self._process_message(
@@ -867,7 +867,7 @@ class TelegramBot:
         if chat.type == "private":
             if self._is_allowed_user(user.id, user.username):
                 await update.message.reply_text(
-                    "Hello! I'm cursor-enhanced with OpenClaw integration. "
+                    "Hello! I'm cursor-enhanced with Runtime integration. "
                     "You can ask me anything and I'll help you using my available tools.\n\n"
                     "Use /help to see available commands."
                 )
@@ -907,19 +907,19 @@ You can also just send me messages and I'll respond using my available tools."""
         """Handle /status command"""
         status_parts = ["**Cursor-Enhanced Status**\n"]
         
-        if self.openclaw:
-            tools = self.openclaw.list_tools()
+        if self.runtime:
+            tools = self.runtime.list_tools()
             status_parts.append(f"Available tools: {len(tools)}")
             for tool in tools[:5]:  # Show first 5
                 name = tool.get('name', 'unknown')
                 status_parts.append(f"- {name}")
             
-            skills = self.openclaw.list_skills()
+            skills = self.runtime.list_skills()
             if skills:
                 status_parts.append(f"\nAvailable skills: {len(skills)}")
                 status_parts.append(", ".join(skills[:5]))
         else:
-            status_parts.append("OpenClaw integration: Not available")
+            status_parts.append("Runtime integration: Not available")
         
         await update.message.reply_text("\n".join(status_parts), parse_mode="Markdown")
     
@@ -970,6 +970,24 @@ You can also just send me messages and I'll respond using my available tools."""
         # Process message through cursor-enhanced
         user_message = message.text
         
+        # Check if message starts with "new" — spawn a fresh concurrent task (no queue, no history)
+        # This allows multithreaded conversation: "new" messages run concurrently without blocking
+        stripped = user_message.strip()
+        # Case-insensitive check: message must start with "new " (with space) or be exactly "new"
+        if stripped.lower().startswith("new ") or stripped.lower() == "new":
+            # Strip the "new" prefix to get the actual message
+            actual_message = stripped[4:].strip() if len(stripped) > 3 else ""
+            if not actual_message:
+                await message.reply_text("Please provide a message after 'new'. Example: new What is the weather?")
+                return
+            logger.info(f"New-thread message from user {user.id}: spawning concurrent task with fresh context (no history)")
+            # Fire-and-forget: spawn a background task so it doesn't block the queue
+            # This allows multiple "new" messages to run concurrently, and they won't wait for regular messages
+            asyncio.create_task(
+                self._handle_new_thread_message(actual_message, user.id, chat.id, message)
+            )
+            return
+        
         try:
             # Send typing indicator
             await context.bot.send_chat_action(chat_id=chat.id, action="typing")
@@ -1006,37 +1024,43 @@ You can also just send me messages and I'll respond using my available tools."""
         run_env = os.environ.copy()
         run_env["CURSOR_ENHANCED_CHANNEL"] = "telegram"
         if cursor_enhanced_path:
-            cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
+            cmd = [cursor_enhanced_path, "--enable-runtime", "-p", message]
         else:
             cursor_enhanced_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
             if os.path.exists(cursor_enhanced_path):
-                cmd = ["bash", cursor_enhanced_path, "--enable-openclaw", "-p", message]
+                cmd = ["bash", cursor_enhanced_path, "--enable-runtime", "-p", message]
             else:
                 import shutil
                 cursor_enhanced_path = shutil.which("cursor-enhanced")
                 if cursor_enhanced_path:
-                    cmd = [cursor_enhanced_path, "--enable-openclaw", "-p", message]
+                    cmd = [cursor_enhanced_path, "--enable-runtime", "-p", message]
 
         if cmd is None:
             # Fallback: use python module entrypoint
             script_dir = os.path.dirname(os.path.abspath(__file__))
             repo_root = os.path.dirname(script_dir)
             run_env["PYTHONPATH"] = f"{repo_root}:{run_env.get('PYTHONPATH', '')}"
-            cmd = ["python3", "-m", "cursor_enhanced", "--enable-openclaw", "-p", message]
+            cmd = ["python3", "-m", "cursor_enhanced", "--enable-runtime", "-p", message]
         
         try:
             logger.info(f"Processing Telegram message from user {user_id}: {message[:100]}")
             
             # Run cursor-enhanced and capture output
+            # Use run_in_executor so the blocking subprocess doesn't freeze the event loop
+            # (critical for allowing concurrent "new" thread messages)
             timeout_sec = getattr(self.config, "request_timeout_seconds", 900)
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout_sec,
-                cwd=os.path.expanduser("~"),
-                env=run_env
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout_sec,
+                    cwd=os.path.expanduser("~"),
+                    env=run_env,
+                )
             )
             
             stdout_text = (result.stdout or "").strip()
@@ -1050,8 +1074,17 @@ You can also just send me messages and I'll respond using my available tools."""
                     logger.warning(f"cursor-enhanced returned 0 but stdout empty, stderr: {stderr_text[:200]}")
                     response = stderr_text
                 else:
-                    logger.warning("cursor-enhanced returned 0 with empty stdout and stderr")
-                    response = "I processed your message but got an empty response. Please try again."
+                    # Empty stdout AND stderr with exit 0 — cursor-agent returned nothing.
+                    # main.py should now print a fallback, but guard against it here too.
+                    logger.warning(
+                        "cursor-enhanced returned 0 with empty stdout and stderr for message: %s",
+                        message[:100],
+                    )
+                    response = (
+                        "I received your message but the agent returned an empty response. "
+                        "This can happen with complex or context-dependent queries. "
+                        "Please try rephrasing or adding more detail."
+                    )
                 logger.info(f"Response generated: {len(response)} characters")
                 return response
             else:
@@ -1064,6 +1097,120 @@ You can also just send me messages and I'll respond using my available tools."""
             return "Sorry, the request timed out. You can increase the limit with requestTimeoutSeconds in config or CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT (current limit was %s seconds)." % getattr(self.config, "request_timeout_seconds", 900)
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
+            return f"Sorry, I encountered an error: {str(e)}"
+
+    async def _handle_new_thread_message(self, message: str, user_id: int, chat_id: int, original_message) -> None:
+        """Handle a 'new' prefixed message: runs concurrently with no history context.
+        
+        This is fire-and-forget from the handler — it sends typing, processes the
+        message with fresh context (no conversation history), and replies directly.
+        """
+        try:
+            from telegram import Bot as TgBot
+            bot = original_message.get_bot()
+            await bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass
+
+        try:
+            response = await self._process_message_fresh(message, user_id, chat_id)
+            # Send response (split if too long for Telegram's 4096 char limit)
+            max_length = 4096
+            if len(response) > max_length:
+                chunks = [response[i:i + max_length] for i in range(0, len(response), max_length - 100)]
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await original_message.reply_text(chunk)
+                    else:
+                        await original_message.reply_text(f"[Continued...]\n{chunk}")
+            else:
+                await original_message.reply_text(response)
+        except Exception as e:
+            logger.error(f"Error in new-thread message: {e}", exc_info=True)
+            try:
+                await original_message.reply_text(f"Sorry, I encountered an error: {str(e)}")
+            except Exception:
+                logger.error(f"Failed to send error reply for new-thread message: {e}")
+
+    async def _process_message_fresh(self, message: str, user_id: int, chat_id: int) -> str:
+        """Process a message with fresh context — no conversation history, minimal prompt.
+        
+        Uses --fresh so cursor-enhanced sends only a minimal system prompt and
+        the current message (no conversation history, no verbose tool listings).
+        Does NOT write to any history file. Runs in a thread pool to avoid
+        blocking the event loop.
+        """
+        import subprocess
+        import os
+
+        cursor_enhanced_path = os.environ.get("CURSOR_ENHANCED_BIN")
+        cmd = None
+
+        run_env = os.environ.copy()
+        run_env["CURSOR_ENHANCED_CHANNEL"] = "telegram"
+
+        base_flags = ["--enable-runtime", "--fresh", "-p", message]
+
+        if cursor_enhanced_path:
+            cmd = [cursor_enhanced_path] + base_flags
+        else:
+            cursor_enhanced_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
+            if os.path.exists(cursor_enhanced_path):
+                cmd = ["bash", cursor_enhanced_path] + base_flags
+            else:
+                import shutil
+                cursor_enhanced_path = shutil.which("cursor-enhanced")
+                if cursor_enhanced_path:
+                    cmd = [cursor_enhanced_path] + base_flags
+
+        if cmd is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            run_env["PYTHONPATH"] = f"{repo_root}:{run_env.get('PYTHONPATH', '')}"
+            cmd = ["python3", "-m", "cursor_enhanced"] + base_flags
+
+        try:
+            logger.info(f"Processing NEW-thread message from user {user_id} (fresh context): {message[:100]}")
+
+            timeout_sec = getattr(self.config, "request_timeout_seconds", 900)
+            # Run subprocess in a thread pool so it doesn't block the event loop
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout_sec,
+                    cwd=os.path.expanduser("~"),
+                    env=run_env,
+                )
+            )
+
+            stdout_text = (result.stdout or "").strip()
+            stderr_text = (result.stderr or "").strip()
+
+            if result.returncode == 0:
+                if stdout_text:
+                    return stdout_text
+                elif stderr_text:
+                    logger.warning(f"new-thread: cursor-enhanced returned 0 but stdout empty, stderr: {stderr_text[:200]}")
+                    return stderr_text
+                else:
+                    return (
+                        "I received your message but the agent returned an empty response. "
+                        "Please try rephrasing or adding more detail."
+                    )
+            else:
+                response = stdout_text or stderr_text or f"Sorry, the agent encountered an error (exit code {result.returncode}). Please try again."
+                logger.error(f"new-thread cursor-enhanced error (code {result.returncode}): {stdout_text[:200]}")
+                return response[:4000]
+        except subprocess.TimeoutExpired:
+            logger.warning("New-thread message processing timed out")
+            return "Sorry, the request timed out."
+        except Exception as e:
+            logger.error(f"Error processing new-thread message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
 
 def load_telegram_config(config_file: Optional[str] = None) -> Optional[TelegramConfig]:
@@ -1160,7 +1307,7 @@ def send_to_paired_users(message: str, config: Optional[TelegramConfig] = None) 
     return asyncio.run(send_to_paired_users_async(message, config))
 
 
-async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_integration=None):
+async def run_telegram_bot(config: Optional[TelegramConfig] = None, runtime_integration=None):
     """Run the Telegram bot"""
     if not TELEGRAM_AVAILABLE or Update is None:
         raise RuntimeError("python-telegram-bot required. Install with: pip install python-telegram-bot")
@@ -1171,7 +1318,7 @@ async def run_telegram_bot(config: Optional[TelegramConfig] = None, openclaw_int
     if not config or not config.bot_token:
         raise ValueError("Telegram bot token is required. Set TELEGRAM_BOT_TOKEN env var or configure in ~/.cursor-enhanced-config.json")
     
-    bot = TelegramBot(config, openclaw_integration)
+    bot = TelegramBot(config, runtime_integration)
     await bot.start()
 
     # In-process scheduler for scheduled notifications (scheduled-notifications.json)

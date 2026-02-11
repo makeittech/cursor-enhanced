@@ -27,7 +27,7 @@ When working in the **cursor-enhanced** project (`~/cursor-enhanced` or any path
    - Only then be considered complete and safe to rely on after reload.
 
 5. **Project layout**  
-   - Root: `main.py`, `openclaw_*.py`, `tool_executor.py`, `tests/`.
+   - Root: `main.py`, `runtime_*.py`, `tool_executor.py`, `tests/`.
    - Package: `cursor_enhanced/` (re-exports and CLI).
    - Config: `~/.cursor-enhanced-config.json`; workspace under `~/.cursor-enhanced/`.
 
@@ -38,3 +38,6 @@ Follow this workflow so the project stays test-covered and deployable.
 - When the user talks to cursor-enhanced via Telegram, the system prompt also injects a short reminder of this workflow so the agent does not forget.
 - Order: implement features → **you run tests** → **you reload** → when all features are done, commit → **push only after user confirms**.
 - Never say "next steps for you" for running tests or reloading—those are the agent's responsibility. Only hand off to the user when something truly requires them (e.g. push after they confirm, or production deploy).
+
+**Model policy (cursor-enhanced default):**
+- cursor-enhanced uses the **auto** (default) model only. Do **not** ask the user for permission to use other models (e.g. opus, sonnet). Use auto only unless the user has explicitly requested a specific model.

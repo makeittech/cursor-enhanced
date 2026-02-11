@@ -1,6 +1,6 @@
 # Memory
 
-Cursor Enhanced uses OpenClaw-style Markdown memory files stored under:
+Cursor Enhanced uses Runtime-style Markdown memory files stored under:
 
 ```
 ~/.cursor-enhanced/workspace/

@@ -96,7 +96,7 @@
 - ✅ Direct messages (DMs)
 - ✅ Group messages (with mention support)
 - ✅ Pairing system for security
-- ✅ Integration with OpenClaw tools
+- ✅ Integration with Runtime tools
 - ✅ Session management
 - ⚠️ Webhook support (coming soon)
 

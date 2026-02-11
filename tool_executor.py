@@ -3,6 +3,7 @@ Tool Executor - Parses agent responses and executes tools mentioned
 """
 
 import re
+import json
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Tuple
@@ -11,7 +12,7 @@ logger = logging.getLogger("cursor_enhanced.tool_executor")
 
 async def execute_tool_from_response(
     agent_response: str,
-    openclaw_integration,
+    runtime_integration,
     max_iterations: int = 3,
     *,
     last_user_message: Optional[str] = None,
@@ -23,7 +24,7 @@ async def execute_tool_from_response(
     without needing to search, with minimal tokens.
     Returns: (updated_response, tool_results)
     """
-    if not openclaw_integration:
+    if not runtime_integration:
         return agent_response, []
     
     tool_results = []
@@ -61,6 +62,15 @@ async def execute_tool_from_response(
             r'smart\s+delegat(?:e|ing)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
             r'delegat(?:e|ing)\s+(?:this\s+)?(?:to\s+(?:a\s+)?)?(?:stronger|better|more\s+capable|optimal|profound)\s+(?:model|agent)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
             r'(?:need|use|pick|choose)\s+(?:a\s+)?(?:stronger|better|more\s+capable|optimal)\s+model\s+(?:for|to)\s*[:\-]?\s*(.+?)(?=\n\n|\n\[|$)',
+        ],
+        'cursor_agent': [
+            # "cursor agent launch: <prompt>" or "launch cursor agent: <prompt>"
+            r'cursor\s+agent\s+(launch|create|status|list|conversation|followup|follow[_-]?up|stop|delete|models|repos|repositories|me|info)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
+            r'(launch|create)\s+(?:a\s+)?cursor\s+(?:cloud\s+)?agent\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
+            r'(?:get|check)\s+cursor\s+agent\s+(status|conversation)\s+(?:for\s+)?(\S+)',
+            r'(list)\s+cursor\s+(?:cloud\s+)?agents?()',
+            r'(delete|stop)\s+cursor\s+agent\s+(\S+)',
+            r'cursor\s+agent\s+(followup|follow[_-]?up)\s+(\S+)\s*[:\-]\s*(.+?)(?=\n\n|\n\[|$)',
         ],
     }
     
@@ -126,7 +136,7 @@ async def execute_tool_from_response(
             logger.info(f"Executing web_fetch for URL: {url}")
             # ToolRegistry.execute expects (tool_name, action, params)
             # For web_fetch, action is empty string, params is a dict
-            result = await openclaw_integration.tool_registry.execute("web_fetch", "", {"url": url})
+            result = await runtime_integration.tool_registry.execute("web_fetch", "", {"url": url})
             tool_results.append({"tool": "web_fetch", "url": url, "result": result})
             
             # Append result to response
@@ -145,7 +155,7 @@ async def execute_tool_from_response(
             logger.info(f"Executing web_search for query: {query}")
             # ToolRegistry.execute expects (tool_name, action, params)
             # For web_search, action is empty string, params is a dict
-            result = await openclaw_integration.tool_registry.execute("web_search", "", {"query": query})
+            result = await runtime_integration.tool_registry.execute("web_search", "", {"query": query})
             tool_results.append({"tool": "web_search", "query": query, "result": result})
             
             # Append result to response
@@ -167,7 +177,7 @@ async def execute_tool_from_response(
     for query in memory_queries[:2]:
         try:
             logger.info(f"Executing memory_search for query: {query}")
-            result = await openclaw_integration.tool_registry.execute("memory_search", "", {"query": query})
+            result = await runtime_integration.tool_registry.execute("memory_search", "", {"query": query})
             tool_results.append({"tool": "memory_search", "query": query, "result": result})
             if result and "error" not in result:
                 entries = result.get("results") or []
@@ -218,7 +228,7 @@ async def execute_tool_from_response(
                 task_to_send = f"{task.strip()}\nUser asked: {one_line}"
         try:
             logger.info(f"Executing delegate tool: persona={persona_id}, task={task_to_send[:80]}...")
-            result = await openclaw_integration.tool_registry.execute(
+            result = await runtime_integration.tool_registry.execute(
                 "delegate", "", {"persona_id": persona_id, "task": task_to_send}
             )
             tool_results.append({"tool": "delegate", "persona_id": persona_id, "result": result})
@@ -244,7 +254,7 @@ async def execute_tool_from_response(
     for city in weather_cities[:1]:  # Limit to 1 weather lookup per response
         try:
             logger.info(f"Executing weather tool for city: {city}")
-            result = await openclaw_integration.tool_registry.execute("weather", "", {"city": city})
+            result = await runtime_integration.tool_registry.execute("weather", "", {"city": city})
             tool_results.append({"tool": "weather", "city": city, "result": result})
             if result and "error" not in result:
                 cur = result.get("current", {})
@@ -292,7 +302,7 @@ async def execute_tool_from_response(
                 task_to_send = f"{task.strip()}\n\nOriginal user request: {one_line}"
         try:
             logger.info(f"Executing smart_delegate: task={task_to_send[:80]}...")
-            result = await openclaw_integration.tool_registry.execute(
+            result = await runtime_integration.tool_registry.execute(
                 "smart_delegate", "", {"task": task_to_send}
             )
             tool_results.append({"tool": "smart_delegate", "result": result})
@@ -308,5 +318,53 @@ async def execute_tool_from_response(
             logger.error(f"Failed to run smart_delegate: {e}")
             tool_results.append({"tool": "smart_delegate", "error": str(e)})
             updated_response += f"\n\n[Smart Delegate Error] {str(e)}"
+
+    # Cursor Agent: detect "cursor agent <action>: <params>" patterns
+    cursor_agent_matches = []
+    for pattern in tool_patterns.get("cursor_agent", []):
+        for match in re.finditer(pattern, agent_response, re.IGNORECASE | re.DOTALL):
+            groups = [g for g in match.groups() if g is not None]
+            if len(groups) >= 1:
+                action = groups[0].strip().lower()
+                rest = groups[1].strip() if len(groups) >= 2 else ""
+                extra = groups[2].strip() if len(groups) >= 3 else ""
+                cursor_agent_matches.append((action, rest, extra))
+
+    for action, rest, extra in cursor_agent_matches[:1]:
+        try:
+            params: Dict[str, Any] = {"action": action}
+            # Parse params based on action
+            if action in ("launch", "create"):
+                params["prompt"] = rest
+                # MODEL POLICY: Never pass a model from AI-generated text.
+                # The AI must NOT silently choose a model — always use "default"
+                # (Cursor auto-selects). user_confirmed_model stays False so that
+                # even if "model" leaks in, CursorAgentTool.launch() will reject it.
+            elif action in ("status", "get", "conversation", "stop", "delete"):
+                params["agent_id"] = rest
+            elif action in ("followup", "follow_up", "follow-up"):
+                params["agent_id"] = rest
+                if extra:
+                    params["prompt"] = extra
+            elif action in ("list",):
+                pass  # no extra params needed
+            # else: models, repos, me — no extra params
+
+            logger.info("Executing cursor_agent: action=%s params=%s", action, {k: v[:60] if isinstance(v, str) else v for k, v in params.items()})
+            result = await runtime_integration.tool_registry.execute("cursor_agent", "", params)
+            tool_results.append({"tool": "cursor_agent", "action": action, "result": result})
+            summary = result.get("_summary", "")
+            if "error" in result:
+                updated_response += f"\n\n[Cursor Agent Error] {result['error']}"
+            elif summary:
+                updated_response += f"\n\n[Cursor Agent: {action}]\n{summary}"
+            else:
+                # Fallback: show JSON
+                safe = {k: v for k, v in result.items() if not k.startswith("_")}
+                updated_response += f"\n\n[Cursor Agent: {action}]\n{json.dumps(safe, indent=2)[:3000]}"
+        except Exception as e:
+            logger.error("Failed to execute cursor_agent (%s): %s", action, e)
+            tool_results.append({"tool": "cursor_agent", "action": action, "error": str(e)})
+            updated_response += f"\n\n[Cursor Agent Error: {action}] {str(e)}"
 
     return updated_response, tool_results

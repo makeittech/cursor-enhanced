@@ -1,11 +1,11 @@
-"""Tests for the weather tool (openclaw_weather_tool.py)."""
+"""Tests for the weather tool (runtime_weather_tool.py)."""
 
 import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from openclaw_weather_tool import WeatherTool, WMO_CODES, _wmo_description, KNOWN_CITIES
+from runtime_weather_tool import WeatherTool, WMO_CODES, _wmo_description, KNOWN_CITIES
 
 
 class WMOCodeTests(unittest.TestCase):
@@ -75,7 +75,7 @@ class WeatherToolUnitTests(unittest.TestCase):
             },
         }
 
-    @patch("openclaw_weather_tool.httpx")
+    @patch("runtime_weather_tool.httpx")
     def test_execute_returns_current_and_forecast(self, mock_httpx):
         mock_resp = MagicMock()
         mock_resp.json.return_value = self._make_mock_response()
@@ -106,7 +106,7 @@ class WeatherToolUnitTests(unittest.TestCase):
         self.assertEqual(forecast[0]["date"], "2026-02-10")
         self.assertEqual(forecast[1]["weather"], "Slight rain")
 
-    @patch("openclaw_weather_tool.httpx")
+    @patch("runtime_weather_tool.httpx")
     def test_get_current_omits_forecast(self, mock_httpx):
         mock_resp = MagicMock()
         mock_resp.json.return_value = self._make_mock_response()
@@ -125,7 +125,7 @@ class WeatherToolUnitTests(unittest.TestCase):
         self.assertIn("current", result)
         self.assertNotIn("forecast", result)
 
-    @patch("openclaw_weather_tool.httpx")
+    @patch("runtime_weather_tool.httpx")
     def test_get_forecast_omits_current(self, mock_httpx):
         mock_resp = MagicMock()
         mock_resp.json.return_value = self._make_mock_response()
@@ -166,18 +166,18 @@ class ToolRegistryIntegrationTests(unittest.TestCase):
     """Test that weather tool is registered in the ToolRegistry."""
 
     def test_weather_tool_registered(self):
-        from openclaw_core import ToolRegistry
+        from runtime_core import ToolRegistry
         registry = ToolRegistry(gateway_client=None, config={})
         self.assertIn("weather", registry.tools)
 
     def test_weather_tool_in_list(self):
-        from openclaw_core import ToolRegistry
+        from runtime_core import ToolRegistry
         registry = ToolRegistry(gateway_client=None, config={})
         tool_names = [t["name"] for t in registry.list_tools()]
         self.assertIn("weather", tool_names)
 
     def test_weather_tool_has_description(self):
-        from openclaw_core import ToolRegistry
+        from runtime_core import ToolRegistry
         registry = ToolRegistry(gateway_client=None, config={})
         tools = registry.list_tools()
         weather = [t for t in tools if t["name"] == "weather"]

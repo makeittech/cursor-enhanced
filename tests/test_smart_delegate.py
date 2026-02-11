@@ -7,7 +7,7 @@ import os
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from openclaw_smart_delegate import (
+from runtime_smart_delegate import (
     assess_complexity,
     select_model,
     format_announcement,

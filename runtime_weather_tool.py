@@ -9,7 +9,7 @@ import asyncio
 from typing import Dict, Optional, Any
 import logging
 
-logger = logging.getLogger("cursor_enhanced.openclaw_weather")
+logger = logging.getLogger("cursor_enhanced.runtime_weather")
 
 try:
     import httpx

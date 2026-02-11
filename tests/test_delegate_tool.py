@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from unittest.mock import patch, MagicMock
 
-from openclaw_delegate_tool import DelegateTool, DEFAULT_PERSONAS, AgentPersona
+from runtime_delegate_tool import DelegateTool, DEFAULT_PERSONAS, AgentPersona
 
 
 class DelegateToolTests(unittest.TestCase):
@@ -148,7 +148,7 @@ class DelegateToolTests(unittest.TestCase):
                 "mcp_config_by_persona": {"home_assistant": "~/.cursor/mcp-homeassistant-only.json"},
             },
         }
-        with patch("openclaw_delegate_tool.os.path.isfile", return_value=True):
+        with patch("runtime_delegate_tool.os.path.isfile", return_value=True):
             async def run():
                 tool = DelegateTool(config=config)
                 out = await tool.execute(persona_id="home_assistant", task="List lights.")

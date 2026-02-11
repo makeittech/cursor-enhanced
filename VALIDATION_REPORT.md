@@ -1,10 +1,10 @@
-# Validation Report - OpenClaw Integration
+# Validation Report - Runtime Integration
 
 ## Files Validated
-- ✅ `openclaw_core.py` - Core OpenClaw features
-- ✅ `openclaw_integration.py` - Integration layer
-- ✅ `openclaw_web_tools.py` - Web tools
-- ✅ `openclaw_session_tools.py` - Session tools
+- ✅ `runtime_core.py` - Core Runtime features
+- ✅ `runtime_integration.py` - Integration layer
+- ✅ `runtime_web_tools.py` - Web tools
+- ✅ `runtime_session_tools.py` - Session tools
 - ✅ `mcp_tools.py` - MCP tools client
 - ✅ `main.py` - Main entry point
 
@@ -18,16 +18,16 @@
 ## Bugs Fixed
 
 ### 1. Unused Imports
-- **Fixed**: Removed unused imports (fcntl, hashlib, tempfile, Path, field, Union) from `openclaw_core.py`
+- **Fixed**: Removed unused imports (fcntl, hashlib, tempfile, Path, field, Union) from `runtime_core.py`
 
 ### 2. Duplicate GatewayClient
-- **Fixed**: Removed duplicate GatewayClient in `openclaw_integration.py`, now uses core implementation
+- **Fixed**: Removed duplicate GatewayClient in `runtime_integration.py`, now uses core implementation
 
 ### 3. Missing Web Tools
-- **Fixed**: Added `openclaw_web_tools.py` with WebFetchTool and WebSearchTool implementations
+- **Fixed**: Added `runtime_web_tools.py` with WebFetchTool and WebSearchTool implementations
 
 ### 4. Missing Session Tools
-- **Fixed**: Added `openclaw_session_tools.py` with:
+- **Fixed**: Added `runtime_session_tools.py` with:
   - SessionsListTool
   - SessionsSendTool
   - SessionsHistoryTool
@@ -130,7 +130,7 @@
 ## Known Limitations
 
 1. **Gateway Dependency**: Most tools require an active gateway connection
-2. **Simplified Implementations**: Some tools are simplified versions of OpenClaw's full implementations
+2. **Simplified Implementations**: Some tools are simplified versions of Runtime's full implementations
 3. **Missing Vector Search**: Memory tool uses simple text search, not vector embeddings
 4. **No Sandboxing**: No Docker sandbox support yet
 5. **Limited Error Recovery**: Basic error handling, missing retry logic

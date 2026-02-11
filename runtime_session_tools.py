@@ -1,5 +1,5 @@
 """
-Session Tools - Ported from OpenClaw agents/tools/sessions-*.ts
+Session Tools - Ported from Runtime agents/tools/sessions-*.ts
 
 Provides session management tools for agent-to-agent communication.
 """
@@ -8,7 +8,7 @@ import uuid
 from typing import Dict, List, Optional, Any
 import logging
 
-logger = logging.getLogger("cursor_enhanced.openclaw_sessions")
+logger = logging.getLogger("cursor_enhanced.runtime_sessions")
 
 class SessionsListTool:
     """Sessions list tool (ported from sessions-list-tool.ts)"""

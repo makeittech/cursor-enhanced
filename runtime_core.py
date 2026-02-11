@@ -1,7 +1,7 @@
 """
-OpenClaw Core Features - Direct Ports from OpenClaw Repository
+Runtime Core Features - Direct Ports from Runtime Repository
 
-This module contains direct Python ports of OpenClaw's core features:
+This module contains direct Python ports of Runtime's core features:
 - Session store with locking and caching
 - Skills system with workspace management
 - Gateway protocol client
@@ -20,7 +20,7 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import logging
 
-logger = logging.getLogger("cursor_enhanced.openclaw_core")
+logger = logging.getLogger("cursor_enhanced.runtime_core")
 
 # ============================================================================
 # Thinking Levels (from auto-reply/thinking.ts)
@@ -188,7 +188,7 @@ def estimate_usage_cost(usage: Optional[UsageTotals], cost: Optional[ModelCostCo
 
 @dataclass
 class SessionEntry:
-    """Session entry (simplified from OpenClaw)"""
+    """Session entry (simplified from Runtime)"""
     session_id: str
     session_key: str
     updated_at: Optional[int] = None
@@ -256,7 +256,7 @@ class SessionStoreCache:
 _session_store_cache = SessionStoreCache()
 
 class SessionStore:
-    """Session store with locking and caching (ported from OpenClaw)"""
+    """Session store with locking and caching (ported from Runtime)"""
     
     def __init__(self, store_path: Optional[str] = None):
         if store_path is None:
@@ -426,7 +426,7 @@ class SkillSnapshot:
     version: Optional[int] = None
 
 class SkillsManager:
-    """Skills manager (ported from OpenClaw)"""
+    """Skills manager (ported from Runtime)"""
     
     def __init__(self, workspace_dir: Optional[str] = None):
         if workspace_dir is None:
@@ -490,7 +490,7 @@ class SkillsManager:
                             file_path=skill_md,
                             description=content[:200] if content else None,
                             frontmatter=frontmatter,
-                            metadata=frontmatter.get("openclaw", {}),
+                            metadata=frontmatter.get("runtime", {}),
                             invocation=frontmatter.get("invocation", {})
                         )
                         
@@ -549,7 +549,7 @@ except ImportError:
     websockets = None  # type: ignore
 
 class GatewayClient:
-    """Gateway WebSocket client (ported from OpenClaw)"""
+    """Gateway WebSocket client (ported from Runtime)"""
     
     def __init__(self, url: str, token: Optional[str] = None, password: Optional[str] = None,
                  timeout_ms: int = 10_000):
@@ -637,7 +637,7 @@ class GatewayClient:
 
 # Web tools will be imported separately to avoid circular dependencies
 try:
-    from openclaw_web_tools import WebFetchTool, WebSearchTool
+    from runtime_web_tools import WebFetchTool, WebSearchTool
     WEB_TOOLS_AVAILABLE = True
 except ImportError:
     WEB_TOOLS_AVAILABLE = False
@@ -646,7 +646,7 @@ except ImportError:
 
 # Session tools
 try:
-    from openclaw_session_tools import (
+    from runtime_session_tools import (
         SessionsListTool, SessionsSendTool, SessionsHistoryTool, MessageTool,
         AgentsListTool, SessionStatusTool, SessionsSpawnTool
     )
@@ -663,7 +663,7 @@ except ImportError:
 
 # Delegate tool (personas / sub-agents)
 try:
-    from openclaw_delegate_tool import DelegateTool
+    from runtime_delegate_tool import DelegateTool
     DELEGATE_TOOL_AVAILABLE = True
 except ImportError:
     DELEGATE_TOOL_AVAILABLE = False
@@ -671,7 +671,7 @@ except ImportError:
 
 # Weather tool (Open-Meteo, no API key)
 try:
-    from openclaw_weather_tool import WeatherTool
+    from runtime_weather_tool import WeatherTool
     WEATHER_TOOL_AVAILABLE = True
 except ImportError:
     WEATHER_TOOL_AVAILABLE = False
@@ -679,11 +679,19 @@ except ImportError:
 
 # Smart delegate tool (complexity-aware model delegation)
 try:
-    from openclaw_smart_delegate import SmartDelegateTool
+    from runtime_smart_delegate import SmartDelegateTool
     SMART_DELEGATE_AVAILABLE = True
 except ImportError:
     SMART_DELEGATE_AVAILABLE = False
     SmartDelegateTool = None
+
+# Cursor Cloud Agent tool (manage cloud agents via Cursor API)
+try:
+    from runtime_cursor_agent import CursorAgentTool
+    CURSOR_AGENT_AVAILABLE = True
+except ImportError:
+    CURSOR_AGENT_AVAILABLE = False
+    CursorAgentTool = None
 
 class BrowserTool:
     """Browser tool (ported from browser-tool.ts)"""
@@ -1009,6 +1017,7 @@ class ToolRegistry:
                     "personas_list": "List available delegate personas (ids and names)",
                     "weather": "Get current weather and forecast for a city (default Lviv). Free Open-Meteo API, no key needed.",
                     "smart_delegate": "Smart delegation: analyze task complexity, discover available models, pick the optimal one, announce the choice, and run a sub-agent with clean context. Use for complex tasks that need a stronger model.",
+                    "cursor_agent": "Cursor Cloud Agent: launch agents on repos, get status, add follow-ups, stop, delete, list models/repos. Actions: launch, status, list, conversation, followup, stop, delete, models, repos, me.",
                 }
                 tool_info["description"] = desc_map.get(name, f"{name} tool")
             
@@ -1059,6 +1068,10 @@ class ToolRegistry:
         # Smart delegate tool (complexity-aware model delegation; no gateway)
         if SMART_DELEGATE_AVAILABLE and SmartDelegateTool is not None:
             self.tools["smart_delegate"] = SmartDelegateTool(self.config)
+
+        # Cursor Cloud Agent tool (launch/manage cloud agents via Cursor API)
+        if CURSOR_AGENT_AVAILABLE and CursorAgentTool is not None:
+            self.tools["cursor_agent"] = CursorAgentTool(self.config)
     
     async def execute(self, tool_name: str, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute tool"""
@@ -1074,7 +1087,7 @@ class ToolRegistry:
             # Tools without action parameter (web_fetch, web_search, memory, sessions, message, agents, delegate, personas_list)
             elif tool_name in ["web_fetch", "web_search", "sessions_list", "sessions_send",
                               "sessions_history", "sessions_spawn", "session_status", "message", "agents_list",
-                              "delegate", "personas_list", "weather", "smart_delegate"]:
+                              "delegate", "personas_list", "weather", "smart_delegate", "cursor_agent"]:
                 if tool_name == "personas_list":
                     return {"personas": tool.list_personas()}
                 return await tool.execute(**params)
@@ -1122,4 +1135,8 @@ if WEATHER_TOOL_AVAILABLE:
 # Export smart delegate tool if available
 if SMART_DELEGATE_AVAILABLE:
     __all__.extend(["SmartDelegateTool"])
+
+# Export cursor agent tool if available
+if CURSOR_AGENT_AVAILABLE:
+    __all__.extend(["CursorAgentTool"])
 

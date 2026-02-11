@@ -23,7 +23,7 @@ python3 -m unittest discover -s tests
 ## Lint
 
 ```bash
-python3 -m py_compile main.py openclaw_core.py tool_executor.py
+python3 -m py_compile main.py runtime_core.py tool_executor.py
 ```
 
 ## Packaging

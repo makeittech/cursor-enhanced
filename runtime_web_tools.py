@@ -1,5 +1,5 @@
 """
-Web Tools - Ported from OpenClaw agents/tools/web-fetch.ts and web-search.ts
+Web Tools - Ported from Runtime agents/tools/web-fetch.ts and web-search.ts
 
 Provides web fetching and searching capabilities.
 """
@@ -11,7 +11,7 @@ import urllib.parse
 from typing import Dict, List, Optional, Any
 import logging
 
-logger = logging.getLogger("cursor_enhanced.openclaw_web")
+logger = logging.getLogger("cursor_enhanced.runtime_web")
 
 try:
     import httpx

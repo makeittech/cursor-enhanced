@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 import logging
 
-logger = logging.getLogger("cursor_enhanced.openclaw_delegate")
+logger = logging.getLogger("cursor_enhanced.runtime_delegate")
 
 
 def _ha_token_from_mcp_config(mcp_config_path: Optional[str]) -> Optional[str]:
@@ -79,11 +79,23 @@ DEFAULT_PERSONAS: List[Dict[str, Any]] = [
         "system_prompt": (
             "Home Assistant specialist. Use MCP to list/control entities, call services, check states; suggest automations. "
             "Be concise and precise with entity IDs and service names.\n\n"
-            "Adding automations: (1) SSH to host 'homeassistant' (Proxmox VM 100). "
+            "**IMPORTANT: Home Assistant Location**\n"
+            "- Home Assistant runs on Proxmox VM 100, hostname 'homeassistant'\n"
+            "- All configuration files are located at: /mnt/data/supervisor/homeassistant/\n"
+            "- Main config: /mnt/data/supervisor/homeassistant/configuration.yaml\n"
+            "- Automations: /mnt/data/supervisor/homeassistant/automations.yaml\n"
+            "- Scripts: /mnt/data/supervisor/homeassistant/scripts.yaml\n"
+            "- Do NOT use paths like /home/ubuntu/swarm/hass-config/ - that is incorrect.\n\n"
+            "**Adding input_boolean helpers (virtual switches):**\n"
+            "- Option 1 (YAML): SSH to host 'homeassistant' (Proxmox VM 100), edit /mnt/data/supervisor/homeassistant/configuration.yaml, "
+            "add under 'input_boolean:' section (e.g., 'blackout: name: BLACKOUT initial: off'). Restart HA or reload config.\n"
+            "- Option 2 (UI): Settings → Devices & Services → Helpers → Create Helper → Toggle → configure → Create.\n"
+            "- Entity ID format: input_boolean.<helper_id>\n\n"
+            "**Adding automations:** (1) SSH to host 'homeassistant' (Proxmox VM 100). "
             "(2) Edit /mnt/data/supervisor/homeassistant/automations.yaml and append new automation(s) as YAML list items "
             "(each - alias: ... with trigger/condition/action). (3) Reload: automation.reload (Bearer token from "
             "HOME_ASSISTANT_TOKEN).\n\n"
-            "After adding or changing scripts/automations: verify via MCP (e.g. get state or list the entity) and report "
+            "**After adding or changing scripts/automations/helpers:** verify via MCP (e.g. get state or list the entity) and report "
             "clearly: \"Success: <entity_id> available\" or \"Failed: <entity_id> not found\"."
         ),
         "model": None,
