@@ -72,8 +72,10 @@ class DelegateToolTests(unittest.TestCase):
         asyncio.run(run())
         mock_run.assert_called_once()
         call_args = mock_run.call_args
-        self.assertIn("-p", call_args[0][0])
-        self.assertIn("Summarize X.", str(call_args[0][0]))
+        cmd = call_args[0][0]
+        self.assertEqual(cmd[0], "bash", "Delegate must use direct bash call")
+        self.assertIn("-p", cmd)
+        self.assertIn("Summarize X.", str(cmd))
 
     @patch("subprocess.run")
     def test_execute_nonzero_exit_returns_error(self, mock_run):

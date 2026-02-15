@@ -9,6 +9,8 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 import asyncio
 import re
+import shutil
+import uuid
 from typing import Optional, Dict, Any, Tuple, List
 
 # Runtime integration imports
@@ -114,6 +116,20 @@ TELEGRAM_SYSTEM_PROMPT_PROJECT = (
     "Full workflow: .cursor/rules/cursor-enhanced-workflow.mdc — follow it so you don't forget.\n"
 )
 
+# Appended to system prompt when running from Telegram (message formatting)
+TELEGRAM_SYSTEM_PROMPT_FORMATTING = (
+    "\n\n=== Telegram: Message formatting ===\n"
+    "Your reply will be shown in Telegram. Format it for readability:\n"
+    "- Use **bold** for emphasis, key terms, and section titles (do not use # for headers).\n"
+    "- Use `inline code` for commands, IDs, and technical names.\n"
+    "- Use ```code blocks``` for multi-line code or config.\n"
+    "- Use short paragraphs and bullet points where helpful.\n"
+    "- You may use emojis or text smilies (e.g. :), :(, ;), heart); they are rendered as emoji in Telegram.\n"
+    "All LLM responses are rendered as beautiful HTML in Telegram.\n"
+    "Use only these symbols: **bold**, *italic*, _italic_, `code`, ```blocks```, [text](url). "
+    "Do not use # for headers, and never use raw < > or & in prose (they break display).\n"
+)
+
 # Logging configuration
 LOG_DIR = os.path.expanduser("~/.cursor-enhanced/logs")
 LOG_FILE = os.path.join(LOG_DIR, "cursor-enhanced.log")
@@ -192,6 +208,124 @@ def _env_for_cursor_agent() -> Dict[str, str]:
         else:
             env["CURSOR_MCP_CONFIG_PATH"] = expanded  # cursor-agent may still use it
     return env
+
+
+DETACHED_REPORTS_DIR = os.path.expanduser("~/.cursor-enhanced/detached-reports")
+DETACHED_PREVIEW_CHARS = 500
+DETACHED_STDERR_PREVIEW_CHARS = 300
+
+
+def _run_detached_worker(run_id: str, task: str, chat_id: Optional[str] = None) -> None:
+    """Run cursor-agent with full permissions and MCP; on exit write report and notify Telegram."""
+    cursor_agent_path = os.path.expanduser("~/.local/bin/cursor-agent")
+    if not os.path.isfile(cursor_agent_path) and not shutil.which("cursor-agent"):
+        logger.error("cursor-agent not found for detached run")
+        _write_detached_report(run_id, task, chat_id, exit_code=-1, stdout="", stderr="cursor-agent not found", log_path=None)
+        _send_detached_notification(run_id, task, chat_id, success=False, message="cursor-agent not found")
+        return
+    if not os.path.isfile(cursor_agent_path) and shutil.which("cursor-agent"):
+        cursor_agent_path = shutil.which("cursor-agent") or "cursor-agent"
+    os.makedirs(DETACHED_REPORTS_DIR, exist_ok=True)
+    log_path = os.path.join(DETACHED_REPORTS_DIR, f"{run_id}.log")
+    prompt = f"User Current Request: {task}"
+    cmd = ["bash", cursor_agent_path, "-f", "-p", prompt]
+    try:
+        with open(log_path, "w", encoding="utf-8") as logf:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=_env_for_cursor_agent(),
+                cwd=os.path.expanduser("~"),
+            )
+            stdout_chunks = []
+            stderr_chunks = []
+            if process.stdout:
+                for line in process.stdout:
+                    logf.write(line)
+                    logf.flush()
+                    stdout_chunks.append(line)
+            if process.stderr:
+                for line in process.stderr:
+                    logf.write(line)
+                    logf.flush()
+                    stderr_chunks.append(line)
+            process.wait()
+            stdout_text = "".join(stdout_chunks)
+            stderr_text = "".join(stderr_chunks)
+    except Exception as e:
+        logger.exception("Detached worker error: %s", e)
+        stdout_text = ""
+        stderr_text = str(e)
+        process = None
+    exit_code = process.returncode if process else -1
+    if process is None:
+        try:
+            with open(log_path, "w", encoding="utf-8") as logf:
+                logf.write(stderr_text)
+        except Exception:
+            pass
+    _write_detached_report(
+        run_id, task, chat_id,
+        exit_code=exit_code,
+        stdout=stdout_text,
+        stderr=stderr_text,
+        log_path=log_path,
+    )
+    success = exit_code == 0
+    _send_detached_notification(run_id, task, chat_id, success=success)
+
+
+def _write_detached_report(
+    run_id: str,
+    task: str,
+    chat_id: Optional[str],
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    log_path: Optional[str],
+) -> None:
+    """Write detached run report to detached-reports/<run_id>.json."""
+    os.makedirs(DETACHED_REPORTS_DIR, exist_ok=True)
+    report_path = os.path.join(DETACHED_REPORTS_DIR, f"{run_id}.json")
+    preview_stdout = (stdout or "")[:DETACHED_PREVIEW_CHARS]
+    preview_stderr = (stderr or "")[:DETACHED_STDERR_PREVIEW_CHARS]
+    report = {
+        "run_id": run_id,
+        "task": task,
+        "chat_id": chat_id,
+        "exit_code": exit_code,
+        "success": exit_code == 0,
+        "stdout_preview": preview_stdout,
+        "stderr_preview": preview_stderr,
+        "log_path": log_path,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+    except Exception as e:
+        logger.error("Failed to write detached report %s: %s", run_id, e)
+
+
+def _send_detached_notification(
+    run_id: str, task: str, chat_id: Optional[str], success: bool, message: Optional[str] = None
+) -> None:
+    """Send short Telegram notification that detached agent finished. To chat_id or all paired."""
+    try:
+        from telegram_integration import send_detached_finished_notification
+        send_detached_finished_notification(
+            run_id=run_id,
+            task=task,
+            chat_id=int(chat_id) if chat_id and str(chat_id).lstrip("-").isdigit() else None,
+            success=success,
+            extra_message=message,
+        )
+    except Exception as e:
+        logger.warning("Detached Telegram notification failed: %s", e)
 
 def load_history(filepath):
     if os.path.exists(filepath):
@@ -326,7 +460,7 @@ async def execute_tools_from_response(response: str, runtime, logger) -> Optiona
     for pattern in web_fetch_patterns:
         matches = re.finditer(pattern, response_lower, re.IGNORECASE)
         for match in matches:
-            url = match.group(1).strip()
+            url = match.group(1).strip().rstrip('`"\'>')
             if url:
                 try:
                     logger.info(f"Executing web_fetch tool with URL: {url}")
@@ -652,12 +786,62 @@ def main():
     parser.add_argument("--schedule-message", type=str, metavar="TEXT", help="Message to send")
     parser.add_argument("--schedule-once", action="store_true", help="One-shot at given time (use with --schedule-time)")
     parser.add_argument("--schedule-user", type=str, metavar="CHAT_ID", help="Telegram chat ID (default: all paired)")
+    # Detached agent: run cursor-agent in background with full permissions + MCP; report to Telegram when done
+    parser.add_argument("--detached", action="store_true", help="Start a detached agent run (spawns worker and exits)")
+    parser.add_argument("--detached-task", type=str, metavar="TASK", help="Task for detached agent")
+    parser.add_argument("--detached-chat-id", type=str, metavar="ID", help="Telegram chat ID to notify when done (optional)")
+    parser.add_argument("--detached-worker", action="store_true", help="Internal: run the detached worker (runs cursor-agent, writes report, notifies Telegram)")
+    parser.add_argument("--detached-run-id", type=str, metavar="ID", help="Internal: run ID for detached worker")
     
     # We use parse_known_args to separate wrapper args from cursor-agent args/prompt
     args, unknown_args = parser.parse_known_args()
 
     if args.version:
         print(APP_VERSION)
+        return
+
+    # --- Detached worker: runs cursor-agent, then writes report and notifies Telegram ---
+    if getattr(args, "detached_worker", False):
+        _run_detached_worker(
+            run_id=getattr(args, "detached_run_id", None) or str(uuid.uuid4()),
+            task=getattr(args, "detached_task", "") or "No task provided.",
+            chat_id=getattr(args, "detached_chat_id", None),
+        )
+        return
+
+    # --- Detached: spawn worker and exit immediately ---
+    if getattr(args, "detached", False) and getattr(args, "detached_task", None):
+        run_id = str(uuid.uuid4())
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = script_dir
+        pythonpath = os.environ.get("PYTHONPATH", "")
+        if repo_root not in pythonpath.split(os.pathsep):
+            pythonpath = f"{repo_root}{os.pathsep}{pythonpath}" if pythonpath else repo_root
+        env = os.environ.copy()
+        env["PYTHONPATH"] = pythonpath
+        cmd = [
+            sys.executable, "-m", "cursor_enhanced",
+            "--detached-worker",
+            "--detached-run-id", run_id,
+            "--detached-task", args.detached_task,
+        ]
+        if getattr(args, "detached_chat_id", None):
+            cmd.extend(["--detached-chat-id", str(args.detached_chat_id)])
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                cwd=os.path.expanduser("~"),
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger.error("Detached spawn failed: %s", e)
+            print(f"Error: failed to start detached agent: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Detached run started: {run_id}")
+        logger.info("Detached run started: %s task=%s", run_id, (args.detached_task or "")[:80])
         return
 
     # Handle reach-at-time commands (schedules to reach user at set times via Telegram/cron)
@@ -1070,6 +1254,8 @@ def main():
                     f"\nAvailable tools: {', '.join(tool_names)}. "
                     "Use them as needed.\n"
                 )
+        if os.environ.get("CURSOR_ENHANCED_CHANNEL") == "telegram":
+            fresh_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_FORMATTING + "\n")
         fresh_prompt_parts.append("User Current Request: " + user_prompt)
         full_prompt = "".join(fresh_prompt_parts)
 
@@ -1286,6 +1472,7 @@ def main():
     if os.environ.get("CURSOR_ENHANCED_CHANNEL") == "telegram":
         full_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_REACH + "\n")
         full_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_PROJECT + "\n")
+        full_prompt_parts.append(TELEGRAM_SYSTEM_PROMPT_FORMATTING + "\n")
         # Smart delegation is especially important for Telegram: announce model choices to the user
         full_prompt_parts.append(
             "\n=== Telegram: Smart Delegation ===\n"

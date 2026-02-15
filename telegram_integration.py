@@ -6,6 +6,8 @@ receive and respond to messages via Telegram, similar to Runtime's Telegram chan
 """
 
 import os
+import re
+import sys
 import json
 import asyncio
 import logging
@@ -15,6 +17,198 @@ from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 
 logger = logging.getLogger("cursor_enhanced.telegram")
+
+
+def _escape_telegram_html(s: str) -> str:
+    """Escape & < > for Telegram HTML parse_mode."""
+    if not s:
+        return s
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _telegram_fallback_sanitize(text: str) -> tuple[str, bool]:
+    """When full HTML conversion fails, still escape and strip so Telegram never sees raw < > & or **."""
+    if not text or not text.strip():
+        return (text, False)
+    body = _escape_telegram_html(text)
+    body = re.sub(r"\*\*", "", body)
+    body = re.sub(r"__", "", body)
+    body = re.sub(r"~~", "", body)
+    body = body.replace("`", "")
+    return (body, True)
+
+
+def _telegram_html_balanced(body: str) -> bool:
+    """Return True if HTML tags <b>, <i>, <s>, <code>, <pre> are balanced (no nesting/order check)."""
+    return (
+        body.count("<b>") == body.count("</b>")
+        and body.count("<i>") == body.count("</i>")
+        and body.count("<s>") == body.count("</s>")
+        and body.count("<code>") == body.count("</code>")
+        and body.count("<pre>") == body.count("</pre>")
+    )
+
+
+# Text smilies → Unicode emoji (order: longer first so e.g. :-) before :-)
+_SMILEY_TO_EMOJI = [
+    (":-)", "😊"),
+    (":-(", "😞"),
+    (";-)", "😉"),
+    (":-D", "😃"),
+    (":-P", "😛"),
+    (":-p", "😛"),
+    (":-O", "😮"),
+    (":'/", "😢"),
+    (":*", "😘"),
+    ("<3", "❤️"),
+    (":/", "😕"),
+    (":)", "😊"),
+    (":(", "😞"),
+    (";)", "😉"),
+    (":D", "😃"),
+    (":P", "😛"),
+    (":p", "😛"),
+    (":O", "😮"),
+    ("':(", "😢"),
+]
+
+
+def _replace_smilies_with_emoji(text: str) -> str:
+    """Replace common text smilies with Unicode emoji. Safe to call on body (code/pre already replaced).
+    Avoid replacing :* when part of :** (bold); avoid replacing :/ when part of :// (URL).
+    """
+    for smiley, emoji in _SMILEY_TO_EMOJI:
+        if smiley == ":*":
+            # Do not replace :* when followed by * (:** is bold closing)
+            text = re.sub(r":\*(?!\*)", emoji, text)
+        elif smiley == ":/":
+            # Do not replace :/ when followed by / (:// is URL)
+            text = re.sub(r":/(?!/)", emoji, text)
+        else:
+            text = text.replace(smiley, emoji)
+    return text
+
+
+def format_llm_response_for_telegram(text: str) -> tuple[str, bool]:
+    """Convert LLM markdown-style output to Telegram HTML for beautiful rendering.
+
+    Converts **bold**, __bold__, *italic*, _italic_, ~~strikethrough~~, `code`, ```blocks```,
+    and [text](url) to Telegram HTML. Converts # headers to bold. Replaces text smilies with emoji.
+    Strips leftover **, __, ~~, stray * _ ` so only Telegram-safe symbols appear.
+    On failure returns sanitized text (escaped + stripped) so parse_mode='HTML' is always safe.
+    """
+    if not text or not text.strip():
+        return (text, False)
+    try:
+        # Extract fenced code blocks (```...```) and replace with placeholders
+        pre_blocks: List[str] = []
+        def pre_repl(m: re.Match) -> str:
+            pre_blocks.append(m.group(1))
+            return f"\x00PRE{len(pre_blocks) - 1}\x00"
+
+        pat_pre = re.compile(r"```[\s\n]*([\s\S]*?)```", re.MULTILINE)
+        body = pat_pre.sub(pre_repl, text)
+
+        # Extract inline `code` and replace with placeholders
+        code_blocks: List[str] = []
+        def code_repl(m: re.Match) -> str:
+            code_blocks.append(m.group(1))
+            return f"\x00CODE{len(code_blocks) - 1}\x00"
+
+        pat_code = re.compile(r"`([^`\n]+)`")
+        body = pat_code.sub(code_repl, body)
+
+        # Extract markdown links [text](url) so we don't escape or mangle them
+        link_blocks: List[tuple[str, str]] = []
+        def link_repl(m: re.Match) -> str:
+            link_blocks.append((m.group(1), m.group(2)))
+            return f"\x00LINK{len(link_blocks) - 1}\x00"
+
+        pat_link = re.compile(r"\[([^\]]*)\]\(([^)]*)\)")
+        body = pat_link.sub(link_repl, body)
+
+        # Replace text smilies with emoji (only in prose; code/pre/link are already placeholders)
+        body = _replace_smilies_with_emoji(body)
+
+        # Convert markdown headers (# ## ###) to bold; skip empty headers to avoid ** ** → <b> </b>
+        # Use [ \t]+ (not \s+) so we don't match across newlines
+        body = re.sub(r"^(#{1,6})[ \t]+(\S.*)$", r"**\2**", body, flags=re.MULTILINE)
+        body = re.sub(r"^(#{1,6})[ \t]*$", "", body, flags=re.MULTILINE)
+
+        # Escape HTML in the whole string (placeholders are safe)
+        body = _escape_telegram_html(body)
+
+        # Bold: **x** and __x__ (do __ before _ so bold takes precedence)
+        body = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", body)
+        body = re.sub(r"__([^_]+)__", r"<b>\1</b>", body)
+        # Italic: *x* (single asterisk, not part of **) and _x_ (single underscore)
+        body = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", body)
+        # Only treat _word_ as italic when word-boundary (so web_fetch, tool_name stay plain).
+        # Fixed-width lookbehind only: at start, or after one space/punct char.
+        body = re.sub(r"^_([^_]+)_(?=[\s\W]|$)", r"<i>\1</i>", body, flags=re.MULTILINE)
+        body = re.sub(r"(?<=[\s\W])_([^_]+)_(?=[\s\W]|$)", r"<i>\1</i>", body)
+        # Strikethrough: ~~x~~
+        body = re.sub(r"~~([^~]+)~~", r"<s>\1</s>", body)
+
+        # Restore code blocks (content already in list; escape when wrapping)
+        for i, content in enumerate(code_blocks):
+            body = body.replace(f"\x00CODE{i}\x00", "<code>" + _escape_telegram_html(content) + "</code>")
+        for i, content in enumerate(pre_blocks):
+            body = body.replace(f"\x00PRE{i}\x00", "<pre>" + _escape_telegram_html(content) + "</pre>")
+        # Restore links (href and text must be HTML-escaped for Telegram)
+        for i, (link_text, link_url) in enumerate(link_blocks):
+            safe_url = _escape_telegram_html(link_url)
+            safe_text = _escape_telegram_html(link_text)
+            body = body.replace(f"\x00LINK{i}\x00", f'<a href="{safe_url}">{safe_text}</a>')
+
+        # Strip leftover markdown symbols so they never appear in Telegram
+        body = re.sub(r"\*\*", "", body)
+        body = re.sub(r"__", "", body)
+        body = re.sub(r"~~", "", body)
+        # Strip stray single * or _ (space-surrounded only, so "*.py" / "a_b" stay)
+        body = re.sub(r" +\* +", " ", body)
+        body = re.sub(r" +_ +", " ", body)
+        # Strip stray single backticks
+        body = body.replace("`", "")
+
+        # If the LLM output literal Telegram HTML tags (e.g. <b>foo</b> instead of **foo**),
+        # they were escaped above. Un-escape only paired tags so they render as formatting.
+        # (Unpaired tags like "a <b> b" stay escaped so we don't break Telegram HTML.)
+        body = re.sub(r"&lt;b&gt;(.*?)&lt;/b&gt;", r"<b>\1</b>", body, flags=re.DOTALL)
+        body = re.sub(r"&lt;i&gt;(.*?)&lt;/i&gt;", r"<i>\1</i>", body, flags=re.DOTALL)
+        body = re.sub(r"&lt;s&gt;(.*?)&lt;/s&gt;", r"<s>\1</s>", body, flags=re.DOTALL)
+        body = re.sub(r"&lt;code&gt;(.*?)&lt;/code&gt;", r"<code>\1</code>", body, flags=re.DOTALL)
+        body = re.sub(r"&lt;pre&gt;(.*?)&lt;/pre&gt;", r"<pre>\1</pre>", body, flags=re.DOTALL)
+        body = re.sub(r'&lt;a href="([^"]*)"&gt;(.*?)&lt;/a&gt;', r'<a href="\1">\2</a>', body, flags=re.DOTALL)
+
+        # Collapse redundant/empty tags so Telegram never shows </b><b> or <b></b>
+        for _ in range(3):  # repeat to handle nested/adjacent
+            body = body.replace("</b><b>", "")
+            body = body.replace("<b></b>", "")
+            body = re.sub(r"<b>\s*</b>", "", body)  # bold only whitespace
+            body = body.replace("</i><i>", "")
+            body = body.replace("<i></i>", "")
+            body = re.sub(r"<i>\s*</i>", "", body)
+
+        # Sanity: if we left any placeholder or added unbalanced tags, fall back to sanitized
+        if (
+            "\x00" in body
+            or body.count("<b>") != body.count("</b>")
+            or body.count("<i>") != body.count("</i>")
+            or body.count("<s>") != body.count("</s>")
+            or body.count("<code>") != body.count("</code>")
+            or body.count("<pre>") != body.count("</pre>")
+        ):
+            return _telegram_fallback_sanitize(text)
+        return (body, True)
+    except Exception as e:
+        logger.debug("Telegram format fallback: %s", e)
+        return _telegram_fallback_sanitize(text)
+
 
 # Scheduled notifications store path
 SCHEDULE_STORE_PATH = os.path.expanduser("~/.cursor-enhanced/scheduled-notifications.json")
@@ -38,6 +232,63 @@ except ImportError as e:
     filters = None
     ContextTypes = None
     logger.warning(f"python-telegram-bot not available: {e}. Install with: pip install python-telegram-bot")
+
+
+# Closing HTML tags we use; splitting after these avoids "unmatched end tag" in Telegram
+_CHUNK_SAFE_END_TAGS = ("</b>", "</i>", "</s>", "</code>", "</pre>", "</a>")
+
+
+def _chunk_send_args(chunk: str, use_html: bool) -> tuple[str, Optional[str]]:
+    """Return (text, parse_mode) for sending a chunk. If use_html but chunk has unbalanced tags, sanitize and use parse_mode=None."""
+    if not use_html or _telegram_html_balanced(chunk):
+        return (chunk, "HTML" if use_html else None)
+    sanitized, _ = _telegram_fallback_sanitize(chunk)
+    return (sanitized, None)
+
+
+def _last_safe_split_index(candidate: str, min_pos: int, max_pos: int) -> int:
+    """Return the rightmost safe split position in candidate[min_pos:max_pos]: after newline or after closing tag."""
+    segment = candidate[min_pos:max_pos]
+    best = -1
+    # Prefer newline
+    last_nl = segment.rfind("\n")
+    if last_nl >= 0:
+        best = min_pos + last_nl + 1
+    for tag in _CHUNK_SAFE_END_TAGS:
+        pos = segment.rfind(tag)
+        if pos >= 0:
+            end = min_pos + pos + len(tag)
+            if end > best:
+                best = end
+    return best if best >= min_pos else -1
+
+
+def chunk_message_for_telegram(text: str, max_length: int = 4090) -> List[str]:
+    """
+    Split formatted message into chunks under max_length for Telegram.
+    Splits only at safe boundaries (newline or after closing HTML tag) to avoid
+    "unmatched end tag" errors when parse_mode=HTML is used.
+    """
+    if len(text) <= max_length:
+        return [text] if text else []
+    chunks: List[str] = []
+    rest = text
+    min_half = max_length // 2
+    while rest:
+        if len(rest) <= max_length:
+            chunks.append(rest)
+            break
+        candidate = rest[: max_length + 1]
+        safe = _last_safe_split_index(candidate, min_half, len(candidate))
+        if safe >= min_half:
+            split_at = safe
+        else:
+            split_at = max_length
+        chunks.append(rest[:split_at].rstrip())
+        rest = rest[split_at:].lstrip()
+        if rest and chunks:
+            rest = "[Continued...]\n" + rest
+    return chunks
 
 
 # --- Scheduled notifications (cron-like) ---
@@ -335,7 +586,7 @@ class TelegramConfig:
     groups: Optional[Dict[str, Any]] = None  # Group configuration
     webhook_url: Optional[str] = None
     webhook_secret: Optional[str] = None
-    request_timeout_seconds: int = 900  # Max seconds per message (default 15 min; set high to avoid "request timed out")
+    request_timeout_seconds: int = 9000  # Max seconds per message (default 2.5h; set high to avoid "request timed out")
 
 
 # Default menu items (can be extended via config "telegram_menu" key)
@@ -357,6 +608,11 @@ DEFAULT_MENU_ITEMS: List[Dict[str, Any]] = [
             "and a brief note if the value is unusually high or low. "
             "Use MCP to query the relevant power/energy sensor(s). Be concise."
         ),
+    },
+    {
+        "id": "detached_reports",
+        "label": "📋 Detached reports",
+        "action": "detached_reports",
     },
 ]
 
@@ -591,6 +847,14 @@ class TelegramBot:
             )])
         return InlineKeyboardMarkup(buttons)
 
+    async def _handle_reports(self, update, context):
+        """Handle /reports command — list detached reports with inline buttons to view."""
+        if update.effective_chat.type == "private" and not self._is_allowed_user(update.effective_user.id, update.effective_user.username):
+            await update.message.reply_text("Please pair first. Send /start")
+            return
+        text, markup = await self._run_menu_detached_reports(update.effective_chat.id)
+        await update.message.reply_text(text, reply_markup=markup or self._build_menu_keyboard())
+
     async def _handle_menu(self, update, context):
         """Handle /menu command — show inline keyboard."""
         user = update.effective_user
@@ -617,7 +881,59 @@ class TelegramBot:
             await query.edit_message_text("Please pair first. Send /start")
             return
 
-        data = query.data  # e.g. "menu:ha_house_fuse_power"
+        data = query.data  # e.g. "menu:ha_house_fuse_power" or "report:<run_id>" or "agent:<code>"
+        if data.startswith("report:"):
+            run_id = data[len("report:"):].strip()
+            report = get_detached_report(run_id)
+            if not report:
+                await query.edit_message_text(f"Report not found: {run_id[:8]}…")
+                return
+            task = report.get("task", "")[:80]
+            success = report.get("success", False)
+            exit_code = report.get("exit_code", "?")
+            completed = report.get("completed_at", "?")
+            preview = (report.get("stdout_preview") or "").strip() or "(no output)"
+            err = (report.get("stderr_preview") or "").strip()
+            text = (
+                f"📋 Detached report: {run_id[:8]}…\n"
+                f"Task: {task}\n"
+                f"Status: {'✅ OK' if success else '❌ Failed'} (exit {exit_code})\n"
+                f"Completed: {completed}\n\n"
+                f"Output preview:\n{preview[:1500]}\n"
+            )
+            if err:
+                text += f"\nStderr: {err[:500]}\n"
+            if len(text) > 4000:
+                text = text[:3990] + "\n…(truncated)"
+            await query.edit_message_text(text, reply_markup=self._build_menu_keyboard())
+            return
+        if data.startswith("agent:"):
+            code_str = data[len("agent:"):].strip()
+            try:
+                agent_code = int(code_str)
+            except ValueError:
+                await query.edit_message_text(f"Invalid agent code: {code_str}")
+                return
+            agent = get_new_thread_agent(agent_code)
+            if not agent:
+                await query.edit_message_text(f"Agent **{agent_code}** not found.")
+                return
+            task = (agent.get("task") or "")[:80]
+            status = agent.get("status", "?")
+            last = (agent.get("last_response") or "").strip()
+            preview = (last[:1500] + "…" if len(last) > 1500 else last) or "(no response yet)"
+            text = (
+                f"**Agent {agent_code}**\nTask: {task}\nStatus: {status}\n\n"
+                f"**Last response:**\n{preview}\n\n"
+                f"To reply: /re {agent_code} your message"
+            )
+            formatted, use_html = format_llm_response_for_telegram(text)
+            if len(formatted) > 4000:
+                formatted = formatted[:3990] + "\n…(truncated)"
+            await query.edit_message_text(
+                formatted, parse_mode="HTML" if use_html else None, reply_markup=self._build_menu_keyboard()
+            )
+            return
         if not data.startswith("menu:"):
             return
         item_id = data[len("menu:"):]
@@ -641,6 +957,8 @@ class TelegramBot:
                 response = await self._run_menu_weather(item)
             elif action == "delegate":
                 response = await self._run_menu_delegate(item, user.id, chat.id)
+            elif action == "detached_reports":
+                response = await self._run_menu_detached_reports(chat.id)
             elif action == "message":
                 # Plain text passthrough to cursor-enhanced
                 response = await self._process_message(item.get("task", label), user.id, chat.id)
@@ -650,18 +968,32 @@ class TelegramBot:
             logger.error(f"Menu action {item_id} failed: {e}", exc_info=True)
             response = f"Error running {label}: {e}"
 
-        # Send result and re-attach the menu keyboard for quick re-use
-        max_length = 4096
+        # Send result and re-attach the menu keyboard for quick re-use (or custom keyboard from response)
         keyboard = self._build_menu_keyboard()
-        if len(response) > max_length:
-            chunks = [response[i:i + max_length] for i in range(0, len(response), max_length - 100)]
-            for i, chunk in enumerate(chunks):
-                if i == len(chunks) - 1:
-                    await context.bot.send_message(chat_id=chat.id, text=chunk, reply_markup=keyboard)
-                else:
-                    await context.bot.send_message(chat_id=chat.id, text=chunk)
-        else:
-            await context.bot.send_message(chat_id=chat.id, text=response, reply_markup=keyboard)
+        if isinstance(response, tuple):
+            response, custom_kb = response
+            if custom_kb is not None:
+                keyboard = custom_kb
+        response_text = response if isinstance(response, str) else str(response)
+        formatted, use_html = format_llm_response_for_telegram(response_text)
+        chunks = chunk_message_for_telegram(formatted)
+        send_kw_base = {"chat_id": chat.id}
+        for i, chunk in enumerate(chunks):
+            last = i == len(chunks) - 1
+            send_text, chunk_parse = _chunk_send_args(chunk, use_html)
+            send_text = send_text[:4096] if len(send_text) > 4096 else send_text
+            kw = {**send_kw_base, "text": send_text}
+            if chunk_parse is not None:
+                kw["parse_mode"] = chunk_parse
+            if last:
+                kw["reply_markup"] = keyboard
+            try:
+                await context.bot.send_message(**kw)
+            except Exception:
+                sanitized, _ = _telegram_fallback_sanitize(chunk)
+                kw["text"] = sanitized[:4096] if len(sanitized) > 4096 else sanitized
+                kw.pop("parse_mode", None)
+                await context.bot.send_message(**kw)
 
     async def _run_menu_weather(self, item: Dict[str, Any]) -> str:
         """Execute a weather menu item directly via WeatherTool (fast, in-process)."""
@@ -732,6 +1064,94 @@ class TelegramBot:
             f"delegate to {persona_id}: {task}", user_id, chat_id
         )
 
+    async def _run_menu_detached_reports(self, chat_id: int):
+        """List recent detached reports and new-thread agents with inline buttons. Returns (text, reply_markup)."""
+        reports = list_detached_reports(limit=10)
+        agents = list_new_thread_agents(limit=10)
+        lines = []
+        buttons = []
+
+        if agents:
+            lines.append("**New-thread agents** (started with «new» or /re):")
+            for a in agents:
+                code = a.get("agent_code", "?")
+                task = (a.get("task") or "")[:30] + ("…" if len(a.get("task") or "") > 30 else "")
+                status = "✅" if a.get("status") == "completed" else "⏳"
+                lines.append(f"• {status} {code} {task}")
+                buttons.append([InlineKeyboardButton(text=f"{status} {code} {task[:22]}", callback_data=f"agent:{code}")])
+            lines.append("")
+
+        if reports:
+            lines.append("**Detached runs** (detached: task):")
+            for r in reports:
+                run_id = r.get("run_id", "")
+                task = (r.get("task") or "")[:35] + ("…" if len(r.get("task") or "") > 35 else "")
+                status = "✅" if r.get("success") else "❌"
+                completed = r.get("completed_at", "")[:19] if r.get("completed_at") else "?"
+                lines.append(f"• {status} {run_id[:8]}… {task} — {completed}")
+                buttons.append([InlineKeyboardButton(text=f"{status} {run_id[:8]}… {task[:25]}", callback_data=f"report:{run_id}")])
+
+        if not lines:
+            return (
+                "No detached agents yet. Start one with: **new** your task — or **detached:** your task. "
+                "Then use /re and the agent code to view or reply.",
+                None,
+            )
+        intro = "📋 **Detached agents** — tap to view last report or reply:\n\n"
+        text = intro + "\n".join(lines)
+        formatted, use_html = format_llm_response_for_telegram(text)
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
+        return formatted, markup
+
+    async def _start_detached_run(self, task: str, chat_id: int) -> Optional[str]:
+        """Spawn cursor-enhanced --detached --detached-task ... --detached-chat-id chat_id; return run_id or None."""
+        import subprocess
+        cursor_enhanced_path = os.environ.get("CURSOR_ENHANCED_BIN")
+        cmd = None
+        if cursor_enhanced_path:
+            cmd = [cursor_enhanced_path, "--detached", "--detached-task", task, "--detached-chat-id", str(chat_id)]
+        else:
+            ce_path = os.path.expanduser("~/.local/bin/cursor-enhanced")
+            if os.path.exists(ce_path):
+                cmd = ["bash", ce_path, "--detached", "--detached-task", task, "--detached-chat-id", str(chat_id)]
+            else:
+                import shutil
+                ce_path = shutil.which("cursor-enhanced")
+                if ce_path:
+                    cmd = [ce_path, "--detached", "--detached-task", task, "--detached-chat-id", str(chat_id)]
+        if cmd is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(script_dir)
+            cmd = [sys.executable, "-m", "cursor_enhanced", "--detached", "--detached-task", task, "--detached-chat-id", str(chat_id)]
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+        else:
+            env = os.environ.copy()
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=os.path.expanduser("~"),
+                    env=env,
+                ),
+            )
+            if result.returncode != 0:
+                logger.warning("Detached start failed: %s %s", result.stdout, result.stderr)
+                return None
+            # stdout should be "Detached run started: <run_id>"
+            line = (result.stdout or "").strip().split("\n")[0] or ""
+            if line.startswith("Detached run started: "):
+                return line.split("Detached run started: ", 1)[1].strip()
+            return None
+        except Exception as e:
+            logger.exception("Detached start error: %s", e)
+            return None
+
     async def start(self):
         """Start the Telegram bot"""
         if not self.config.enabled:
@@ -749,6 +1169,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("help", self._handle_help))
         self.application.add_handler(CommandHandler("status", self._handle_status))
         self.application.add_handler(CommandHandler("menu", self._handle_menu))
+        self.application.add_handler(CommandHandler("reports", self._handle_reports))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         
@@ -878,13 +1299,14 @@ class TelegramBot:
                 self.pending_pairings[chat_id_str] = code
                 self._save_pending_pairing(chat_id_str, code)
                 logger.info(f"Generated pairing code {code} for chat {chat_id_str}")
-                await update.message.reply_text(
+                pairing_msg = (
                     f"Hello! To start using this bot, please approve the pairing code: **{code}**\n\n"
                     f"Run this command on your system:\n"
                     f"`cursor-enhanced --telegram-approve {code}`\n\n"
-                    "Or if you're already paired, you may need to check your configuration.",
-                    parse_mode="Markdown"
+                    "Or if you're already paired, you may need to check your configuration."
                 )
+                formatted, use_html = format_llm_response_for_telegram(pairing_msg)
+                await update.message.reply_text(formatted, parse_mode="HTML" if use_html else None)
         else:
             await update.message.reply_text(
                 "This bot is available in this group. "
@@ -897,9 +1319,12 @@ class TelegramBot:
 /start - Start the bot
 /help - Show this help message
 /menu - Quick actions menu
+/reports - View detached agents and their last report (menu → Detached reports)
+/re CODE - Show last response for agent CODE (from «new» or /re)
+/re CODE message - Send a follow-up to that agent
 /status - Show bot status and available tools
 
-You can also just send me messages and I'll respond using my available tools."""
+Start a concurrent agent: **new** your task (get a code like 1000). Reply later: **/re 1000** to view, **/re 1000 your message** to continue. Use **detached:** task for background runs; reports in /reports."""
         
         await update.message.reply_text(help_text)
     
@@ -921,7 +1346,9 @@ You can also just send me messages and I'll respond using my available tools."""
         else:
             status_parts.append("Runtime integration: Not available")
         
-        await update.message.reply_text("\n".join(status_parts), parse_mode="Markdown")
+        status_text = "\n".join(status_parts)
+        formatted, use_html = format_llm_response_for_telegram(status_text)
+        await update.message.reply_text(formatted, parse_mode="HTML" if use_html else None)
     
     async def _handle_message(self, update, context):
         """Handle incoming messages"""
@@ -950,21 +1377,17 @@ You can also just send me messages and I'll respond using my available tools."""
             if chat_id_str in self.pending_pairings:
                 code = self.pending_pairings[chat_id_str]
                 logger.info(f"User {user.id} has pending pairing {code}, reminding them")
-                await message.reply_text(
-                    f"Please approve the pairing code first: **{code}**\n\n"
-                    f"Run: `cursor-enhanced --telegram-approve {code}`",
-                    parse_mode="Markdown"
-                )
+                msg = f"Please approve the pairing code first: **{code}**\n\nRun: `cursor-enhanced --telegram-approve {code}`"
+                formatted, use_html = format_llm_response_for_telegram(msg)
+                await message.reply_text(formatted, parse_mode="HTML" if use_html else None)
             else:
                 code = self._generate_pairing_code()
                 self.pending_pairings[chat_id_str] = code
                 self._save_pending_pairing(chat_id_str, code)
                 logger.info(f"Generated new pairing code {code} for user {user.id} (chat {chat_id_str})")
-                await message.reply_text(
-                    f"Pairing required. Code: **{code}**\n\n"
-                    f"Run: `cursor-enhanced --telegram-approve {code}`",
-                    parse_mode="Markdown"
-                )
+                msg = f"Pairing required. Code: **{code}**\n\nRun: `cursor-enhanced --telegram-approve {code}`"
+                formatted, use_html = format_llm_response_for_telegram(msg)
+                await message.reply_text(formatted, parse_mode="HTML" if use_html else None)
             return
         
         # Process message through cursor-enhanced
@@ -980,36 +1403,85 @@ You can also just send me messages and I'll respond using my available tools."""
             if not actual_message:
                 await message.reply_text("Please provide a message after 'new'. Example: new What is the weather?")
                 return
-            logger.info(f"New-thread message from user {user.id}: spawning concurrent task with fresh context (no history)")
-            # Fire-and-forget: spawn a background task so it doesn't block the queue
-            # This allows multiple "new" messages to run concurrently, and they won't wait for regular messages
+            agent_code = allocate_new_thread_agent(actual_message, chat.id, user.id)
+            logger.info(f"New-thread message from user {user.id}: agent_code={agent_code}, spawning concurrent task")
+            notice = (
+                f"New agent started (code **{agent_code}**). You'll get a reply here. "
+                f"To continue later: /re {agent_code} your message. View in menu → Detached reports."
+            )
+            fmt_notice, use_html = format_llm_response_for_telegram(notice)
+            await message.reply_text(fmt_notice, parse_mode="HTML" if use_html else None)
             asyncio.create_task(
-                self._handle_new_thread_message(actual_message, user.id, chat.id, message)
+                self._handle_new_thread_message(actual_message, user.id, chat.id, message, agent_code=agent_code)
             )
             return
-        
+
+        # /re <code> or /re <code> <message> — show last report or send follow-up to that agent
+        re_match = re.match(r"^/re\s+(\d+)(?:\s+(.*))?\s*$", stripped, re.DOTALL)
+        if re_match:
+            code_str, reply_message = re_match.group(1), (re_match.group(2) or "").strip()
+            agent_code = int(code_str)
+            agent = get_new_thread_agent(agent_code)
+            if not agent:
+                msg = f"Agent **{agent_code}** not found. Check /reports for valid codes."
+                fmt_msg, use_html = format_llm_response_for_telegram(msg)
+                await message.reply_text(fmt_msg, parse_mode="HTML" if use_html else None)
+                return
+            if not reply_message:
+                # Show last report
+                last = (agent.get("last_response") or "").strip()
+                task = (agent.get("task") or "")[:80]
+                status = agent.get("status", "?")
+                text = (
+                    f"**Agent {agent_code}**\nTask: {task}\nStatus: {status}\n\n"
+                    f"**Last response:**\n{(last[:3500] + '…' if len(last) > 3500 else last) or '(no response yet)'}\n\n"
+                    f"To reply: `/re {agent_code} <your message>`"
+                )
+                formatted, use_html = format_llm_response_for_telegram(text)
+                await message.reply_text(formatted, parse_mode="HTML" if use_html else None)
+                return
+            # Send follow-up in that agent's context (fresh run, then update same agent's last_response)
+            asyncio.create_task(
+                self._handle_reply_thread_message(agent_code, reply_message, user.id, chat.id, message)
+            )
+            return
+
+        # Check for detached agent marker: "detached: <task>" — run cursor-agent in background, report when done
+        if stripped.lower().startswith("detached:"):
+            task = stripped[9:].strip()  # len("detached:") = 9
+            if not task:
+                await message.reply_text("Please provide a task after 'detached:'. Example: detached: Refactor the payment module")
+                return
+            run_id = await self._start_detached_run(task, chat.id)
+            if run_id:
+                await message.reply_text(
+                    f"Detached agent started. You'll get a short notification in this chat when it's done.\n"
+                    f"Run ID: {run_id[:8]}…\nView reports: /reports or menu → Detached reports"
+                )
+            else:
+                await message.reply_text("Failed to start detached agent. Check server logs.")
+            return
+
         try:
             # Send typing indicator
             await context.bot.send_chat_action(chat_id=chat.id, action="typing")
             
             # Route message through cursor-enhanced
             response = await self._process_message(user_message, user.id, chat.id)
-            
-            # Send response (split if too long for Telegram's 4096 char limit)
-            max_length = 4096
-            if len(response) > max_length:
-                # Split into chunks
-                chunks = [response[i:i+max_length] for i in range(0, len(response), max_length-100)]
-                for i, chunk in enumerate(chunks):
-                    if i == 0:
-                        await message.reply_text(chunk)
-                    else:
-                        await message.reply_text(f"[Continued...]\n{chunk}")
-            else:
-                await message.reply_text(response)
+            formatted, use_html = format_llm_response_for_telegram(response)
+            chunks = chunk_message_for_telegram(formatted)
+            for chunk in chunks:
+                send_text, chunk_parse = _chunk_send_args(chunk, use_html)
+                send_text = send_text[:4096] if len(send_text) > 4096 else send_text
+                try:
+                    await message.reply_text(send_text, parse_mode=chunk_parse)
+                except Exception:
+                    sanitized, _ = _telegram_fallback_sanitize(chunk)
+                    await message.reply_text(sanitized[:4096] if len(sanitized) > 4096 else sanitized)
         except Exception as e:
             logger.error(f"Error processing Telegram message: {e}", exc_info=True)
-            await message.reply_text(f"Sorry, I encountered an error: {str(e)}")
+            err_msg = str(e)
+            await message.reply_text("Sorry, I encountered an error: " + _escape_telegram_html(err_msg))
     
     async def _process_message(self, message: str, user_id: int, chat_id: int) -> str:
         """Process a message through cursor-enhanced"""
@@ -1039,7 +1511,12 @@ You can also just send me messages and I'll respond using my available tools."""
             # Fallback: use python module entrypoint
             script_dir = os.path.dirname(os.path.abspath(__file__))
             repo_root = os.path.dirname(script_dir)
-            run_env["PYTHONPATH"] = f"{repo_root}:{run_env.get('PYTHONPATH', '')}"
+            # Ensure PYTHONPATH includes repo_root and site-packages for .pth files
+            site_packages = os.path.expanduser("~/.local/lib/python3.10/site-packages")
+            pythonpath = f"{repo_root}:{site_packages}"
+            if run_env.get("PYTHONPATH"):
+                pythonpath = f"{pythonpath}:{run_env['PYTHONPATH']}"
+            run_env["PYTHONPATH"] = pythonpath
             cmd = ["python3", "-m", "cursor_enhanced", "--enable-runtime", "-p", message]
         
         try:
@@ -1048,7 +1525,7 @@ You can also just send me messages and I'll respond using my available tools."""
             # Run cursor-enhanced and capture output
             # Use run_in_executor so the blocking subprocess doesn't freeze the event loop
             # (critical for allowing concurrent "new" thread messages)
-            timeout_sec = getattr(self.config, "request_timeout_seconds", 900)
+            timeout_sec = getattr(self.config, "request_timeout_seconds", 9000)
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
@@ -1094,16 +1571,16 @@ You can also just send me messages and I'll respond using my available tools."""
                 return response[:4000]
         except subprocess.TimeoutExpired:
             logger.warning("Message processing timed out")
-            return "Sorry, the request timed out. You can increase the limit with requestTimeoutSeconds in config or CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT (current limit was %s seconds)." % getattr(self.config, "request_timeout_seconds", 900)
+            return "Sorry, the request timed out. You can increase the limit with requestTimeoutSeconds in config or CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT (current limit was %s seconds)." % getattr(self.config, "request_timeout_seconds", 9000)
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
 
-    async def _handle_new_thread_message(self, message: str, user_id: int, chat_id: int, original_message) -> None:
+    async def _handle_new_thread_message(
+        self, message: str, user_id: int, chat_id: int, original_message, agent_code: Optional[int] = None
+    ) -> None:
         """Handle a 'new' prefixed message: runs concurrently with no history context.
-        
-        This is fire-and-forget from the handler — it sends typing, processes the
-        message with fresh context (no conversation history), and replies directly.
+        If agent_code is set, updates that agent's last_response when done.
         """
         try:
             from telegram import Bot as TgBot
@@ -1114,21 +1591,24 @@ You can also just send me messages and I'll respond using my available tools."""
 
         try:
             response = await self._process_message_fresh(message, user_id, chat_id)
-            # Send response (split if too long for Telegram's 4096 char limit)
-            max_length = 4096
-            if len(response) > max_length:
-                chunks = [response[i:i + max_length] for i in range(0, len(response), max_length - 100)]
-                for i, chunk in enumerate(chunks):
-                    if i == 0:
-                        await original_message.reply_text(chunk)
-                    else:
-                        await original_message.reply_text(f"[Continued...]\n{chunk}")
-            else:
-                await original_message.reply_text(response)
+            if agent_code is not None:
+                update_new_thread_agent_response(agent_code, response)
+            formatted, use_html = format_llm_response_for_telegram(response)
+            chunks = chunk_message_for_telegram(formatted)
+            for chunk in chunks:
+                send_text, chunk_parse = _chunk_send_args(chunk, use_html)
+                send_text = send_text[:4096] if len(send_text) > 4096 else send_text
+                try:
+                    await original_message.reply_text(send_text, parse_mode=chunk_parse)
+                except Exception:
+                    sanitized, _ = _telegram_fallback_sanitize(chunk)
+                    await original_message.reply_text(sanitized[:4096] if len(sanitized) > 4096 else sanitized)
         except Exception as e:
             logger.error(f"Error in new-thread message: {e}", exc_info=True)
+            if agent_code is not None:
+                update_new_thread_agent_response(agent_code, f"Error: {e}")
             try:
-                await original_message.reply_text(f"Sorry, I encountered an error: {str(e)}")
+                await original_message.reply_text("Sorry, I encountered an error: " + _escape_telegram_html(str(e)))
             except Exception:
                 logger.error(f"Failed to send error reply for new-thread message: {e}")
 
@@ -1166,13 +1646,18 @@ You can also just send me messages and I'll respond using my available tools."""
         if cmd is None:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             repo_root = os.path.dirname(script_dir)
-            run_env["PYTHONPATH"] = f"{repo_root}:{run_env.get('PYTHONPATH', '')}"
+            # Ensure PYTHONPATH includes repo_root and site-packages for .pth files
+            site_packages = os.path.expanduser("~/.local/lib/python3.10/site-packages")
+            pythonpath = f"{repo_root}:{site_packages}"
+            if run_env.get("PYTHONPATH"):
+                pythonpath = f"{pythonpath}:{run_env['PYTHONPATH']}"
+            run_env["PYTHONPATH"] = pythonpath
             cmd = ["python3", "-m", "cursor_enhanced"] + base_flags
 
         try:
             logger.info(f"Processing NEW-thread message from user {user_id} (fresh context): {message[:100]}")
 
-            timeout_sec = getattr(self.config, "request_timeout_seconds", 900)
+            timeout_sec = getattr(self.config, "request_timeout_seconds", 9000)
             # Run subprocess in a thread pool so it doesn't block the event loop
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -1213,6 +1698,36 @@ You can also just send me messages and I'll respond using my available tools."""
             logger.error(f"Error processing new-thread message: {e}", exc_info=True)
             return f"Sorry, I encountered an error: {str(e)}"
 
+    async def _handle_reply_thread_message(
+        self, agent_code: int, reply_message: str, user_id: int, chat_id: int, original_message
+    ) -> None:
+        """Handle /re <code> <message>: run message in fresh context and update that agent's last_response."""
+        try:
+            bot = original_message.get_bot()
+            await bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            pass
+        try:
+            response = await self._process_message_fresh(reply_message, user_id, chat_id)
+            update_new_thread_agent_response(agent_code, response)
+            formatted, use_html = format_llm_response_for_telegram(response)
+            chunks = chunk_message_for_telegram(formatted)
+            for chunk in chunks:
+                send_text, chunk_parse = _chunk_send_args(chunk, use_html)
+                send_text = send_text[:4096] if len(send_text) > 4096 else send_text
+                try:
+                    await original_message.reply_text(send_text, parse_mode=chunk_parse)
+                except Exception:
+                    sanitized, _ = _telegram_fallback_sanitize(chunk)
+                    await original_message.reply_text(sanitized[:4096] if len(sanitized) > 4096 else sanitized)
+        except Exception as e:
+            logger.error(f"Error in reply-thread message: {e}", exc_info=True)
+            update_new_thread_agent_response(agent_code, f"Error: {e}")
+            try:
+                await original_message.reply_text("Sorry, I encountered an error: " + _escape_telegram_html(str(e)))
+            except Exception:
+                pass
+
 def load_telegram_config(config_file: Optional[str] = None) -> Optional[TelegramConfig]:
     """Load Telegram configuration from config file or environment"""
     if config_file is None:
@@ -1237,17 +1752,16 @@ def load_telegram_config(config_file: Optional[str] = None) -> Optional[Telegram
     if not bot_token:
         return None
     
-    timeout_val = 900
-    env_timeout = os.environ.get("CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT")
-    if env_timeout is not None:
-        try:
-            timeout_val = max(60, int(env_timeout))
-        except ValueError:
-            pass
-    elif telegram_config.get("requestTimeoutSeconds") is not None:
+    timeout_val = 9000
+    if telegram_config.get("requestTimeoutSeconds") is not None:
         try:
             timeout_val = max(60, int(telegram_config["requestTimeoutSeconds"]))
         except (ValueError, TypeError):
+            pass
+    elif os.environ.get("CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT") is not None:
+        try:
+            timeout_val = max(60, int(os.environ["CURSOR_ENHANCED_TELEGRAM_REQUEST_TIMEOUT"]))
+        except ValueError:
             pass
     
     return TelegramConfig(
@@ -1305,6 +1819,173 @@ async def send_to_paired_users_async(message: str, config: Optional[TelegramConf
 def send_to_paired_users(message: str, config: Optional[TelegramConfig] = None) -> bool:
     """Synchronous wrapper: send a message to all paired Telegram users."""
     return asyncio.run(send_to_paired_users_async(message, config))
+
+
+# --- Detached agent reports ---
+DETACHED_REPORTS_DIR = os.path.expanduser("~/.cursor-enhanced/detached-reports")
+
+# --- New-thread agents (started with "new" or continued with /re <code>) ---
+NEW_THREAD_AGENTS_FILE = os.path.expanduser("~/.cursor-enhanced/new-thread-agents.json")
+NEW_THREAD_AGENT_CODE_START = 1000
+
+
+def _load_new_thread_agents() -> Dict[str, Any]:
+    """Load new-thread agents store. Returns dict with next_code and agents list."""
+    if not os.path.exists(NEW_THREAD_AGENTS_FILE):
+        return {"next_code": NEW_THREAD_AGENT_CODE_START, "agents": []}
+    try:
+        with open(NEW_THREAD_AGENTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+        next_code = data.get("next_code", NEW_THREAD_AGENT_CODE_START)
+        return {"next_code": next_code, "agents": agents}
+    except Exception as e:
+        logger.warning("Failed to load new-thread agents: %s", e)
+        return {"next_code": NEW_THREAD_AGENT_CODE_START, "agents": []}
+
+
+def _save_new_thread_agents(data: Dict[str, Any]) -> None:
+    """Save new-thread agents store."""
+    os.makedirs(os.path.dirname(NEW_THREAD_AGENTS_FILE) or ".", exist_ok=True)
+    tmp = NEW_THREAD_AGENTS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, NEW_THREAD_AGENTS_FILE)
+    except Exception as e:
+        logger.error("Failed to save new-thread agents: %s", e)
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def allocate_new_thread_agent(task: str, chat_id: int, user_id: int) -> int:
+    """Allocate a new agent code and append the agent record. Returns agent_code."""
+    data = _load_new_thread_agents()
+    code = data["next_code"]
+    data["next_code"] = code + 1
+    data["agents"].append({
+        "agent_code": code,
+        "task": (task or "")[:500],
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "last_response": None,
+        "last_response_at": None,
+        "status": "running",
+    })
+    _save_new_thread_agents(data)
+    return code
+
+
+def update_new_thread_agent_response(agent_code: int, response: str) -> bool:
+    """Update last_response and status for an agent. Returns True if found."""
+    data = _load_new_thread_agents()
+    for a in data["agents"]:
+        if a.get("agent_code") == agent_code:
+            a["last_response"] = (response or "")[:50000]
+            a["last_response_at"] = datetime.now(timezone.utc).isoformat()
+            a["status"] = "completed"
+            _save_new_thread_agents(data)
+            return True
+    return False
+
+
+def get_new_thread_agent(agent_code: int) -> Optional[Dict[str, Any]]:
+    """Get one agent by code."""
+    data = _load_new_thread_agents()
+    for a in data["agents"]:
+        if a.get("agent_code") == agent_code:
+            return dict(a)
+    return None
+
+
+def list_new_thread_agents(limit: int = 30) -> List[Dict[str, Any]]:
+    """List recent new-thread agents (newest first)."""
+    data = _load_new_thread_agents()
+    agents = list(data["agents"])
+    agents.sort(key=lambda a: a.get("last_response_at") or a.get("started_at") or "", reverse=True)
+    return agents[:limit]
+
+
+def list_detached_reports(limit: int = 20) -> List[Dict[str, Any]]:
+    """List recent detached reports (newest first). Returns list of report dicts (with run_id, task, success, completed_at, etc.)."""
+    if not os.path.isdir(DETACHED_REPORTS_DIR):
+        return []
+    reports = []
+    for name in os.listdir(DETACHED_REPORTS_DIR):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(DETACHED_REPORTS_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["_path"] = path
+            reports.append(data)
+        except Exception as e:
+            logger.warning("Failed to load report %s: %s", path, e)
+    reports.sort(key=lambda r: r.get("completed_at") or "", reverse=True)
+    return reports[:limit]
+
+
+def get_detached_report(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a single report by run_id."""
+    path = os.path.join(DETACHED_REPORTS_DIR, f"{run_id}.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load report %s: %s", path, e)
+        return None
+
+
+def send_detached_finished_notification(
+    run_id: str,
+    task: str,
+    chat_id: Optional[int] = None,
+    success: bool = True,
+    extra_message: Optional[str] = None,
+) -> None:
+    """Send short notification to chat (or all paired users) that detached agent finished. Sync wrapper."""
+    asyncio.run(send_detached_finished_notification_async(run_id, task, chat_id, success, extra_message))
+
+
+async def send_detached_finished_notification_async(
+    run_id: str,
+    task: str,
+    chat_id: Optional[int] = None,
+    success: bool = True,
+    extra_message: Optional[str] = None,
+) -> None:
+    """Send short notification that detached agent finished. To chat_id or all paired."""
+    if not TELEGRAM_AVAILABLE or Bot is None:
+        logger.warning("Telegram not available for detached notification")
+        return
+    config = load_telegram_config()
+    if not config or not config.bot_token:
+        logger.warning("Telegram not configured for detached notification")
+        return
+    task_preview = (task or "task")[:60] + ("..." if len(task or "") > 60 else "")
+    status = "finished" if success else "failed"
+    text = f"Detached agent {status}: {task_preview}\nView report: /reports"
+    if extra_message:
+        text = f"{text}\n{extra_message}"
+    bot = Bot(token=config.bot_token)
+    if chat_id is not None:
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            logger.warning("Detached notification to chat %s failed: %s", chat_id, e)
+    else:
+        for cid in _get_paired_chat_ids():
+            try:
+                await bot.send_message(chat_id=cid, text=text)
+            except Exception as e:
+                logger.warning("Detached notification to %s failed: %s", cid, e)
 
 
 async def run_telegram_bot(config: Optional[TelegramConfig] = None, runtime_integration=None):

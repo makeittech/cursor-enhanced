@@ -326,6 +326,8 @@ class SessionStore:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, self.store_path)
             os.chmod(self.store_path, 0o600)
+            # Repopulate cache so the full session is cached after save (e.g. when marked as watched)
+            _session_store_cache.set(self.store_path, store, self._get_mtime_ms())
         except Exception as e:
             logger.error(f"Failed to save session store: {e}")
             if os.path.exists(tmp_path):

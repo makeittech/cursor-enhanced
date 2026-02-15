@@ -96,7 +96,8 @@ DEFAULT_PERSONAS: List[Dict[str, Any]] = [
             "(each - alias: ... with trigger/condition/action). (3) Reload: automation.reload (Bearer token from "
             "HOME_ASSISTANT_TOKEN).\n\n"
             "**After adding or changing scripts/automations/helpers:** verify via MCP (e.g. get state or list the entity) and report "
-            "clearly: \"Success: <entity_id> available\" or \"Failed: <entity_id> not found\"."
+            "clearly: \"Success: <entity_id> available\" or \"Failed: <entity_id> not found\".\n\n"
+            "**MCP server name:** Use server \"home-assistant\" (with hyphen) when calling MCP tools or list_mcp_resources; do not use \"home_assistant\" (underscore) as the server name."
         ),
         "model": None,
     },

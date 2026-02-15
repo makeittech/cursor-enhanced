@@ -74,9 +74,10 @@ async def execute_tool_from_response(
         ],
     }
     
-    # Extract URLs from response
+    # Extract URLs from response (strip trailing backticks/quotes that markdown may add)
     url_pattern = r'https?://[^\s\)]+'
-    urls = re.findall(url_pattern, agent_response, re.IGNORECASE)
+    raw_urls = re.findall(url_pattern, agent_response, re.IGNORECASE)
+    urls = [u.rstrip('`"\'>') for u in raw_urls]
     
     def clean_query(query: str) -> str:
         """Clean extracted query by removing quotes, parentheses, and trailing punctuation"""
